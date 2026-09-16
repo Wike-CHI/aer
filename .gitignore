@@ -32,6 +32,12 @@ deploy/*.env
 !deploy/env.example
 .env
 
+# Throwaway scripts written while developing a patch. One of these reaching a
+# commit is how a green local run becomes a red pipeline: `ruff check .` covers
+# the repository root, so a scratch file is linted like any other source file.
+/_*.py
+/_*.sh
+
 # Infrastructure tooling scratch space
 .ci-data/
 

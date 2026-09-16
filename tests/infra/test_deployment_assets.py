@@ -374,6 +374,10 @@ class TestIgnoreFiles:
 
         for pattern in (".env", "backups/", "*.db", "*.db-wal", "data/*", "deploy/*.env"):
             assert pattern in document, f"{pattern} must be ignored"
+        # Scratch scripts belong to a working session, not to the repository: one of
+        # them reaching a commit is how a green local run becomes a red pipeline
+        # (`ruff check .` lints the repository root).
+        assert "/_*.py" in document
         # The template stays tracked, or the next operator has nothing to copy.
         assert "!deploy/env.example" in document
         assert "!data/.gitkeep" in document

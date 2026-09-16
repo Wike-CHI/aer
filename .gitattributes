@@ -1,0 +1,23 @@
+# Line endings, pinned deliberately.
+#
+# Everything in this repository is *deployed to Linux*: the ops scripts are
+# executed by `bash` inside a container or over SSH, and the workflows run on
+# ubuntu-latest. A shell script checked out with CRLF does not fail loudly at
+# checkout time -- it fails at the worst possible moment with
+# `$'\r': command not found`, partway through a deployment.
+#
+# Relying on each contributor's `core.autocrlf` setting for this is not a plan:
+# on Windows it defaults to true, which is exactly the setting that corrupts the
+# working copy. `eol=lf` here overrides it in both directions, so the blob and the
+# working copy agree on every platform.
+* text=auto eol=lf
+
+# Binary assets must never be normalised.
+*.db binary
+*.db-wal binary
+*.db-shm binary
+*.png binary
+*.jpg binary
+*.pdf binary
+*.gz binary
+*.zip binary

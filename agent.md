@@ -832,9 +832,9 @@ Distillation：
 ```text
 RAW
 ↓
-VERIFIED
-↓
 DISTILLED
+↓
+VERIFIED
 ↓
 REUSED
 ↓
@@ -851,11 +851,46 @@ TRAINING_DATA
 DEPRECATED
 ```
 
+各状态含义：
+
+```text
+RAW        候选经验已落库，尚未完成提炼
+DISTILLED  轨迹已压缩为结构化经验陈述
+VERIFIED   该陈述的核心事实已有外部证据支持
+```
+
+顺序说明（M5 修正）：原文档写的是
+
+```text
+RAW → VERIFIED → DISTILLED
+```
+
+这在语义上不成立：验证是**对某条陈述的检验**，而陈述只有提炼之后才存在。
+因此正确顺序是：
+
+```text
+RAW → DISTILLED → VERIFIED
+```
+
+改动理由与影响见 `docs/DECISIONS.md` D-029。
+
 禁止任务一成功就直接进入：
 
 ```text
 TRAINING_DATA
 ```
+
+当前只允许：
+
+```text
+RAW         → DISTILLED
+RAW         → DEPRECATED
+DISTILLED   → VERIFIED
+DISTILLED   → DEPRECATED
+VERIFIED    → DEPRECATED
+```
+
+`REUSED` 及以上需要 `experience_usage` 数据（M7），**当前不存在任何到达它们的路径**。
 
 ---
 

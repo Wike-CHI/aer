@@ -624,6 +624,8 @@ API 是否成功
 CREATE TABLE experiences (
     id TEXT PRIMARY KEY,
 
+    kind TEXT NOT NULL,
+
     domain TEXT NOT NULL,
 
     title TEXT NOT NULL,
@@ -636,27 +638,51 @@ CREATE TABLE experiences (
 
     solution TEXT,
 
+    failed_attempts_json TEXT,
+
     workflow_json TEXT,
 
     avoid_json TEXT,
 
     status TEXT NOT NULL,
 
-    confidence REAL DEFAULT 0,
+    confidence REAL NOT NULL,
 
-    reuse_count INTEGER DEFAULT 0,
+    generalizable BOOLEAN NOT NULL,
 
-    success_count INTEGER DEFAULT 0,
+    outcome_verified BOOLEAN NOT NULL,
 
-    failure_count INTEGER DEFAULT 0,
+    dedup_key TEXT NOT NULL,
 
     created_at DATETIME NOT NULL,
 
     updated_at DATETIME NOT NULL,
 
-    metadata_json TEXT
+    metadata_json TEXT,
+
+    UNIQUE (id)
 );
+
+CREATE INDEX ix_experiences_dedup_key ON experiences (dedup_key);
+CREATE INDEX ix_experiences_kind ON experiences (kind);
+CREATE INDEX ix_experiences_status ON experiences (status);
 ```
+
+与原设计的差异（M5 实现为准）：
+
+```text
++ kind               三类经验（SUCCESS / RECOVERY / FAILURE）
++ failed_attempts_json  失败尝试，Recovery / Failure 经验的核心内容
++ generalizable      是否具备跨任务复用价值
++ outcome_verified   结果本身是否有独立证据（≠ solution 已验证）
++ dedup_key          确定性去重指纹（索引，但**非唯一**）
+- reuse_count / success_count / failure_count
+                     属于 experience_usage 的产物，M7 才可实现（D-037）
+```
+
+`dedup_key` 刻意不唯一：它是规范化字符串，过激的规范化绝不能拒绝一条合法经验
+（D-035）。`experience_sources` 与 `runs` 之间是 `ON DELETE CASCADE`，
+`experiences` 删除时来源同样级联。
 
 ---
 
@@ -666,14 +692,20 @@ CREATE TABLE experiences (
 
 ```text
 RAW
-VERIFIED
 DISTILLED
+VERIFIED
 REUSED
 PROVEN
 TRAINING_CANDIDATE
 TRAINING_DATA
 DEPRECATED
 ```
+
+顺序为 `RAW → DISTILLED → VERIFIED`（M5 修正，原文档写作
+`RAW → VERIFIED → DISTILLED`）。验证针对的是提炼后的陈述，因此必须先提炼。
+详见 `docs/DECISIONS.md` D-029。
+
+当前仅前三个状态可达；`REUSED` 及以上等待 M7 的 `experience_usage` 数据。
 
 ---
 

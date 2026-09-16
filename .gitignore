@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# AER runtime data (SQLite databases and generated artifacts)
+data/*
+!data/.gitkeep
+*.db
+*.db-wal
+*.db-shm
+
+# Backups (produced by scripts/backup_sqlite.py; large and environment-specific)
+backups/
+
+# Deployment secrets and host state.
+# `deploy/env.example` is committed; everything else in `deploy/` is either a
+# credential or a per-server record of what is currently deployed.
+deploy/.env
+deploy/*.env
+!deploy/env.example
+.env
+
+# Infrastructure tooling scratch space
+.ci-data/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local agent state (memory notes, task cache) — not project source
+.workbuddy/

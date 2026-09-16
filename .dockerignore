@@ -1,0 +1,60 @@
+# Build context exclusions for the AER runtime image.
+#
+# Two rules drive this file:
+#   1. no data and no secrets may ever enter an image -- once pushed, an image is
+#      effectively immortal and readable by anyone with pull rights
+#      (docs/DECISIONS.md D-038);
+#   2. the four things the runtime actually needs must survive: `aer/`,
+#      `migrations/`, `alembic.ini` and `scripts/`.
+# Root-anchored patterns use a leading `/` so a future directory named `data`
+# somewhere inside the package is not silently dropped from the build.
+# Everything listed below is noise that only makes the build cache worse.
+
+# --- version control and CI -------------------------------------------------
+/.git
+/.github
+/.gitignore
+
+# --- local environments and tool caches -------------------------------------
+/.venv
+/venv
+/env
+/build
+/dist
+__pycache__
+*.py[cod]
+*.egg-info
+/.pytest_cache
+/.mypy_cache
+/.ruff_cache
+
+# --- data: never baked into an image ----------------------------------------
+/data
+/backups
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+
+# --- secrets: never baked into an image -------------------------------------
+# `deploy/` holds the host-side compose file and the production `.env`; mounting
+# it into an image would be the fastest way to leak a credential.
+/deploy
+.env
+.env.*
+*.env
+
+# --- host-side concerns, docs and the test suite ----------------------------
+/docs
+/tests
+/agent.md
+/.workbuddy
+*.md
+!README.md
+
+# --- editors / OS ------------------------------------------------------------
+/.idea
+/.vscode
+.DS_Store
+Thumbs.db
+*.swp

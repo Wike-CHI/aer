@@ -1,0 +1,294 @@
+# Continuous Deployment for AER.
+#
+# Push to `main`, or run it by hand. The pipeline is deliberately linear:
+#
+#   quality gate -> build immutable image -> push to GHCR -> SSH -> backup
+#                -> migrate -> smoke test -> record the deployed SHA
+#
+# Three decisions are worth reading before changing anything here:
+#
+#   * The quality gate is re-run on `main` even though CI already passed on the
+#     pull request. The artifact that reaches production must be produced *by the
+#     commit that reaches production*, and a merge commit is a different commit
+#     from the one CI tested. Trusting the PR run would mean shipping bytes nobody
+#     verified.
+#   * The image is the only artifact. The server pulls it; it never clones the
+#     repository, installs Python or builds anything. "Build once, deploy the same
+#     artifact" only holds if there is exactly one place that produces the artifact.
+#   * Every credential stays in GitHub secrets or on the server. The SSH key is
+#     written to a file with 0600 rather than passed on a command line, the GHCR
+#     token is never sent to the host at all (the server authenticates itself once,
+#     by hand, with a read-only scope), and no step enables `set -x`.
+#
+# Action versions are the current majors. checkout/setup-python v7 and
+# build-push-action v7 run on the Node 24 runner, which needs a runner of at least
+# v2.327.1 -- `ubuntu-latest` satisfies this, so nothing is silently downgraded.
+
+name: deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Image to deploy. Leave empty to build from this ref."
+        required: false
+        default: ""
+      git_sha:
+        description: "Commit the image was built from (required when image is set)."
+        required: false
+        default: ""
+
+# Least privilege, widened only as far as publishing an image requires.
+permissions:
+  contents: read
+  packages: write
+
+# Two deployments must never touch the same SQLite database at once. Not cancelled
+# in progress: interrupting a run halfway through a migration is precisely the
+# state nobody wants to reason about afterwards.
+concurrency:
+  group: aer-production
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+  REGISTRY: ghcr.io
+
+jobs:
+  prepare:
+    name: resolve the release identity
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      needs_build: ${{ steps.resolve.outputs.needs_build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve image and commit
+        id: resolve
+        env:
+          INPUT_IMAGE: ${{ inputs.image }}
+          INPUT_SHA: ${{ inputs.git_sha }}
+          REGISTRY: ${{ env.REGISTRY }}
+        run: |
+          set -Eeuo pipefail
+
+          # GHCR paths must be lowercase, and GitHub preserves the case of owner
+          # and repository names, so they are normalised here rather than assumed.
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          repo="$(printf '%s' "${GITHUB_REPOSITORY#*/}" | tr '[:upper:]' '[:lower:]')"
+
+          if [ -n "${INPUT_IMAGE}" ]; then
+            # Manual redeploy of an image that already exists: do not rebuild it.
+            # Rebuilding would produce *different* bytes under the same identity,
+            # which defeats the point of an immutable tag.
+            case "${INPUT_IMAGE}" in
+              *:latest|*:)
+                echo "::error::refusing to deploy '${INPUT_IMAGE}': an immutable sha-* tag is required"
+                exit 1
+                ;;
+            esac
+            image="${INPUT_IMAGE}"
+            sha="${INPUT_SHA:-$(printf '%s' "${image}" | sed -n 's/.*:sha-\([0-9a-f]\{7,40\}\)$/\1/p')}"
+            if [ -z "${sha}" ]; then
+              echo "::error::cannot derive a commit from '${image}'; pass git_sha explicitly"
+              exit 1
+            fi
+            needs_build=false
+          else
+            sha="$(git rev-parse HEAD)"
+            image="${REGISTRY}/${owner}/${repo}:sha-${sha}"
+            needs_build=true
+          fi
+
+          echo "image=${image}" >>"${GITHUB_OUTPUT}"
+          echo "sha=${sha}" >>"${GITHUB_OUTPUT}"
+          echo "needs_build=${needs_build}" >>"${GITHUB_OUTPUT}"
+          echo "release: ${image} (${sha})"
+
+  quality-gate:
+    name: quality gate (re-run on main)
+    needs: prepare
+    runs-on: ubuntu-latest
+    env:
+      AER_ENV: production
+      AER_DATA_DIR: /tmp/aer-ci/data
+      AER_ARTIFACT_DIR: /tmp/aer-ci/artifacts
+      AER_KNOWLEDGE_DIR: /tmp/aer-ci/knowledge
+      AER_BACKUP_DIR: /tmp/aer-ci/backups
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install the package with its dev extra
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --editable '.[dev]'
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Formatting
+        run: ruff format --check .
+
+      - name: Types
+        run: mypy aer/
+
+      - name: Tests
+        run: pytest -q
+
+  publish:
+    name: build and push the immutable image
+    needs:
+      - prepare
+      - quality-gate
+    if: needs.prepare.outputs.needs_build == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ needs.prepare.outputs.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          # The workflow's own GITHUB_TOKEN is enough: no long-lived PAT is
+          # created just to push an image from the repository that owns it.
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          # Exactly one tag, and it is the commit. A `latest` alias would add a
+          # second, mutable name for the same bytes -- and the only thing it buys
+          # is a way for a human to deploy something other than what current.env
+          # records.
+          tags: ${{ needs.prepare.outputs.image }}
+          build-args: |
+            GIT_SHA=${{ needs.prepare.outputs.sha }}
+            GIT_SOURCE=${{ github.server_url }}/${{ github.repository }}
+            GIT_REF=${{ github.ref_name }}
+            AER_VERSION=${{ github.ref_name }}
+
+  deploy:
+    name: deploy to production
+    needs:
+      - prepare
+      - quality-gate
+      - publish
+    # Runs when the image was published, and also when publishing was skipped
+    # because a manual run supplied an existing image. Never runs after a failure.
+    if: >-
+      ${{
+        !cancelled()
+        && needs.prepare.result == 'success'
+        && needs.quality-gate.result == 'success'
+        && (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+      }}
+    runs-on: ubuntu-latest
+    # Declared so the repository can require a human approval for production later
+    # without touching this file.
+    environment: production
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install the deployment key and known hosts
+        env:
+          SSH_KEY: ${{ secrets.PRODUCTION_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PRODUCTION_KNOWN_HOSTS }}
+        run: |
+          set -Eeuo pipefail
+          install -d -m 0700 "${HOME}/.ssh"
+          # Written to a file, never passed as an argument: command lines end up in
+          # process listings and, on some hosts, in shell history.
+          printf '%s\n' "${SSH_KEY}" >"${HOME}/.ssh/id_ed25519"
+          chmod 0600 "${HOME}/.ssh/id_ed25519"
+          printf '%s\n' "${KNOWN_HOSTS}" >"${HOME}/.ssh/known_hosts"
+          chmod 0600 "${HOME}/.ssh/known_hosts"
+          if [ ! -s "${HOME}/.ssh/known_hosts" ]; then
+            echo "::error::PRODUCTION_KNOWN_HOSTS is empty. Host key verification is"
+            echo "::error::mandatory; disabling it would make a forged server indistinguishable."
+            exit 1
+          fi
+
+      - name: Copy the deployment assets to the host
+        env:
+          PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
+          PRODUCTION_USER: ${{ secrets.PRODUCTION_USER }}
+          PRODUCTION_PORT: ${{ secrets.PRODUCTION_PORT || '22' }}
+        run: |
+          set -Eeuo pipefail
+          SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=yes
+                    -o UserKnownHostsFile="${HOME}/.ssh/known_hosts")
+          target="${PRODUCTION_USER}@${PRODUCTION_HOST}"
+          ssh "${SSH_OPTS[@]}" -p "${PRODUCTION_PORT}" "${target}" \
+            'mkdir -p /srv/aer/deploy /srv/aer/logs'
+          # Only the host-side orchestrators and the compose file travel: the
+          # backup/restore/smoke helpers live inside the image, which is why the
+          # server needs no Python of its own.
+          scp -P "${PRODUCTION_PORT}" "${SSH_OPTS[@]}" \
+            scripts/deploy.sh scripts/rollback.sh \
+            deploy/compose.yaml deploy/env.example \
+            "${target}:/srv/aer/deploy/"
+          # The executable bit is not reliable across checkouts (Windows hosts do
+          # not track it), so it is set explicitly rather than assumed. The script
+          # is also invoked through `bash` below, so a missing bit can never turn
+          # into a confusing "Permission denied" in the middle of a release.
+          ssh "${SSH_OPTS[@]}" -p "${PRODUCTION_PORT}" "${target}" \
+            'chmod 0755 /srv/aer/deploy/*.sh'
+
+      - name: Deploy over SSH
+        env:
+          PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
+          PRODUCTION_USER: ${{ secrets.PRODUCTION_USER }}
+          PRODUCTION_PORT: ${{ secrets.PRODUCTION_PORT || '22' }}
+          RELEASE_IMAGE: ${{ needs.prepare.outputs.image }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -Eeuo pipefail
+          SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=yes
+                    -o UserKnownHostsFile="${HOME}/.ssh/known_hosts")
+          target="${PRODUCTION_USER}@${PRODUCTION_HOST}"
+          # A single remote command string, not several arguments: `ssh` joins
+          # trailing arguments with spaces, so `ssh host "export A=1" "B=2" cmd`
+          # silently becomes `export A=1 B=2 cmd` -- which exports `cmd` as a
+          # variable name instead of running it.
+          #
+          # The release identity is passed as a command-scoped assignment (not
+          # interpolated into a shell program), and both values are produced by the
+          # `prepare` job from the repository name and a commit SHA, neither of
+          # which can contain a quote.
+          ssh "${SSH_OPTS[@]}" -p "${PRODUCTION_PORT}" "${target}" \
+            "cd /srv/aer/deploy && IMAGE='${RELEASE_IMAGE}' GIT_SHA='${RELEASE_SHA}' AER_LOG_DIR=/srv/aer/logs bash ./deploy.sh"
+
+      - name: Report the deployed release
+        env:
+          RELEASE_IMAGE: ${{ needs.prepare.outputs.image }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          {
+            echo "### Deployed"
+            echo
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| commit | \`${RELEASE_SHA}\` |"
+            echo "| image | \`${RELEASE_IMAGE}\` |"
+          } >>"${GITHUB_STEP_SUMMARY}"

@@ -1,0 +1,63 @@
+# AER production deployment (single server, single service).
+#
+# AER is an **embedded** runtime: there is no HTTP server waiting on a port and
+# no worker to keep alive. This file therefore does not describe a running
+# service -- it describes a *hermetic execution context* for one-shot commands:
+#
+#     docker compose -f deploy/compose.yaml run --rm aer-runtime alembic upgrade head
+#     docker compose -f deploy/compose.yaml run --rm aer-runtime python /app/scripts/smoke_test.py
+#
+# The default command of the image prints the AER version and exits, so a bare
+# `docker compose up` is harmless rather than a fake service. See
+# `docs/DECISIONS.md` D-039.
+#
+# Variable naming is deliberately split, because conflating the two is how a
+# container ends up writing to an unmounted `/app/data` and losing everything on
+# the next `docker compose down`:
+#
+#   AER_DATA_DIR        container path  (baked into the image as /data)
+#   AER_HOST_DATA_DIR   host path       (/srv/aer/data) -- the actual volume
+#
+# `${VAR:?message}` is used for every bind source so that a missing variable
+# aborts the command instead of letting Docker create an anonymous volume that
+# looks fine until the day it is removed.
+
+name: aer
+
+services:
+  aer-runtime:
+    image: "${AER_IMAGE:?AER_IMAGE must be set, e.g. ghcr.io/<owner>/aer:sha-<git-sha>}"
+
+    # One-shot by design. Nothing restarts, nothing stays resident.
+    restart: "no"
+
+    # Non-root (uid 10001, set in the image) and no capabilities: the runtime
+    # opens a SQLite file, it does not bind ports or change ownership.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # Non-secret runtime configuration only (paths, log level). Credentials are
+    # never read from here; see `deploy/env.example` and docs/DEPLOYMENT.md.
+    env_file:
+      - .env
+
+    volumes:
+      - type: bind
+        source: "${AER_HOST_DATA_DIR:?AER_HOST_DATA_DIR must be set (e.g. /srv/aer/data)}"
+        target: /data
+      - type: bind
+        source: "${AER_HOST_ARTIFACT_DIR:?AER_HOST_ARTIFACT_DIR must be set (e.g. /srv/aer/artifacts)}"
+        target: /artifacts
+      - type: bind
+        source: "${AER_HOST_KNOWLEDGE_DIR:?AER_HOST_KNOWLEDGE_DIR must be set (e.g. /srv/aer/knowledge)}"
+        target: /knowledge
+      - type: bind
+        source: "${AER_HOST_BACKUP_DIR:?AER_HOST_BACKUP_DIR must be set (e.g. /srv/aer/backups)}"
+        target: /backups
+
+    # /data must be a real directory, never an anonymous volume: the database is
+    # the only irreplaceable thing in this deployment.
+    tmpfs:
+      - /tmp

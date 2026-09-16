@@ -1,0 +1,77 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aer-runtime"
+version = "0.4.0"
+description = "AER - Agent Experience Runtime (SQLite lightweight edition)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+
+dependencies = [
+    "alembic>=1.13",
+    "pydantic>=2.7",
+    "sqlalchemy>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    # Infrastructure tests parse deploy/compose.yaml and the workflow files. Parsing
+    # them for real is the point: a text-only check of a YAML file cannot tell a
+    # valid document from a broken one, and "the deploy file is broken" is exactly
+    # the failure that only shows up during an incident.
+    "pyyaml>=6.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["aer*"]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers --strict-config"
+
+# ---------------------------------------------------------------------------
+# ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["aer", "tests"]
+# Markdown files are specifications, not code: ruff must not touch them even
+# though they contain python snippets.
+extend-exclude = ["data", ".venv", "*.md", "docs", "agent.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["aer", "tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011"]
+# scripts/ are file-invoked operator entry points, not a package, so a sibling
+# import has to sit below the sys.path fix-up that makes it resolvable.
+"scripts/restore_sqlite.py" = ["E402"]
+"scripts/smoke_test.py" = ["E402"]
+
+# ---------------------------------------------------------------------------
+# mypy - intentionally light; type checking is not allowed to block delivery
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+files = ["aer"]
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+show_error_codes = true

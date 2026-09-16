@@ -1,0 +1,230 @@
+# Continuous Integration for AER.
+#
+# Runs on every pull request and on demand. Nothing here touches production: no
+# server, no production database, no production secret. CI's job is to answer one
+# question -- "can this commit be built, migrated, tested and packaged?" -- from a
+# completely cold `ubuntu-latest` runner, with no reliance on a developer's
+# machine, its caches, Windows path quirks or anything under .workbuddy.
+#
+# Two things are checked here that a local run typically cannot check:
+#   * that the Dockerfile actually builds and that the *image* (not the source
+#     tree) can import AER, open a database and find its migration scripts;
+#   * that deploy/compose.yaml is valid and that its required-variable guards
+#     actually guard.
+#
+# Action versions are the current majors (checkout/setup-python v7,
+# build-push-action v7). v6 and later run on the Node 24 runner, which requires a
+# GitHub-hosted runner of at least v2.327.1 -- `ubuntu-latest` satisfies this, so
+# no downgrade is needed or applied; if a self-hosted runner is ever introduced,
+# its version must be checked before assuming these actions still work.
+
+name: ci
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: CI only reads the repository. Nothing here needs to write to a
+# repository, a package registry or an issue.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  quality-gate:
+    name: quality gate
+    runs-on: ubuntu-latest
+    env:
+      # Point the deployment configuration at throwaway absolute paths: nothing can
+      # then create directories inside the checkout, and the production path rules
+      # are exercised instead of bypassed. Individual tests pass their own
+      # environment explicitly, so this does not make the suite depend on ambient
+      # configuration.
+      AER_ENV: production
+      AER_DATA_DIR: /tmp/aer-ci/data
+      AER_ARTIFACT_DIR: /tmp/aer-ci/artifacts
+      AER_KNOWLEDGE_DIR: /tmp/aer-ci/knowledge
+      AER_BACKUP_DIR: /tmp/aer-ci/backups
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install the package with its dev extra
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --editable '.[dev]'
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Formatting
+        run: ruff format --check .
+
+      - name: Types
+        run: mypy aer/
+
+      - name: Tests
+        run: pytest -q
+
+      # The repository's migration tests already cover fresh databases and schema
+      # parity (tests/storage/test_migrations.py), so this is not a second copy of
+      # them. It exercises the path a production deployment actually takes -- the
+      # *alembic CLI*, as a shell user would run it, against an empty file that has
+      # nothing to do with the checked-in data/ directory.
+      - name: Alembic CLI on a fresh database
+        run: |
+          set -Eeuo pipefail
+          db="$(mktemp -d)/fresh.db"
+          test ! -e "${db}"
+          AER_DB_PATH="${db}" alembic upgrade head
+          AER_DB_PATH="${db}" alembic current
+          current="$(AER_DB_PATH="${db}" alembic current | awk '{print $1}')"
+          head="$(alembic heads | awk '{print $1}')"
+          echo "fresh database at ${current}, heads: ${head}"
+          test "${current}" = "${head}"
+          rm -f -- "${db}" "${db}-wal" "${db}-shm"
+
+      # shellcheck ships on the GitHub-hosted Ubuntu image, so this needs no extra
+      # action. It is skipped rather than failing when the binary is absent, so a
+      # runner image change cannot turn a lint into a false blocker.
+      - name: Shell scripts (shellcheck, when available)
+        run: |
+          set -Eeuo pipefail
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck --severity=warning scripts/*.sh
+          else
+            echo "shellcheck not present on this runner; skipping"
+          fi
+
+  container:
+    name: container build and smoke
+    runs-on: ubuntu-latest
+    env:
+      # A syntactically valid placeholder so `docker compose config` can resolve
+      # ${AER_IMAGE} while the negative check below still proves the guard fires
+      # when the variable is absent.
+      AER_IMAGE: ghcr.io/aer-ci/aer:sha-0000000000000000000000000000000000000000
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # `cp` rather than a sed expression: this way the checked-in template is
+      # itself validated as a usable env file, which is exactly what an operator
+      # copies on the server.
+      - name: Prepare the compose environment
+        run: cp deploy/env.example deploy/.env
+
+      - name: Validate the compose file
+        run: docker compose --file deploy/compose.yaml config >/dev/null
+
+      - name: The compose file must refuse an empty image reference
+        run: |
+          set -Eeuo pipefail
+          if env -u AER_IMAGE docker compose --file deploy/compose.yaml config >/dev/null 2>&1; then
+            echo "::error::compose accepted an empty AER_IMAGE; the guards are not working"
+            exit 1
+          fi
+          echo "compose correctly refused the deployment without an image reference"
+
+      - name: Build the image
+        run: |
+          docker build \
+            --tag aer-ci:sha-0000000 \
+            --build-arg GIT_SHA=0000000 \
+            --build-arg GIT_SOURCE="${{ github.server_url }}/${{ github.repository }}" \
+            --build-arg GIT_REF="${{ github.ref_name }}" \
+            --build-arg AER_VERSION=ci \
+            --file Dockerfile .
+
+      - name: Default command reports the version
+        run: |
+          set -Eeuo pipefail
+          output="$(docker run --rm aer-ci:sha-0000000)"
+          echo "${output}"
+          case "${output}" in
+            aer-runtime*) ;;
+            *) echo "::error::unexpected image entrypoint output"; exit 1 ;;
+          esac
+
+      # Everything the runtime needs must be *in* the image. This is the check that
+      # catches "tests are green but the container cannot migrate": the migration
+      # scripts and alembic.ini have to survive .dockerignore and the COPY steps.
+      - name: The image ships the package, migrations and alembic.ini
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --entrypoint sh aer-ci:sha-0000000 -c '
+            set -eu
+            test -f /app/alembic.ini
+            test -d /app/migrations/versions
+            test -f /app/scripts/smoke_test.py
+            python -c "import aer; print(\"imported aer\", aer.__version__)"
+            python -c "from aer.storage.migrations import head_revision; print(\"head\", head_revision())"
+          '
+
+      # The write path, in a throwaway database inside the container: proves
+      # initialisation, migration and a real run round-trip without ever pointing
+      # at production data.
+      - name: Container smoke test (temporary database)
+        run: |
+          docker run --rm \
+            --env AER_ENV=development \
+            --env AER_DATA_DIR=/tmp/aer-smoke \
+            --env AER_ARTIFACT_DIR=/tmp/aer-smoke/artifacts \
+            --env AER_KNOWLEDGE_DIR=/tmp/aer-smoke/knowledge \
+            --env AER_BACKUP_DIR=/tmp/aer-smoke/backups \
+            aer-ci:sha-0000000 \
+            python /app/scripts/smoke_test.py --temp-db-check
+
+      # uid 10001 must own the data directories it is given. Checked without a bind
+      # mount so it tests the image's own filesystem, independently of how any
+      # particular host has set ownership up.
+      - name: The container user can write the persistent directories
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --user 10001:10001 --entrypoint sh aer-ci:sha-0000000 -c '
+            set -eu
+            for dir in /data /artifacts /knowledge /backups; do
+              touch "${dir}/.write-check"
+              rm "${dir}/.write-check"
+              echo "writable: ${dir}"
+            done
+          '
+
+      # Create a schema-only database with the CLI (no inline Python, no heredoc),
+      # then run the real ops scripts against it *inside the image*. This is what
+      # proves backup/restore work in the shipped artifact rather than only in the
+      # test environment -- including the sibling import in restore_sqlite.py.
+      - name: Backup and restore round-trip inside the container
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --entrypoint sh aer-ci:sha-0000000 -c '
+            set -eu
+            export AER_ENV=development
+            export AER_DATA_DIR=/tmp/aer-rt/data
+            export AER_ARTIFACT_DIR=/tmp/aer-rt/artifacts
+            export AER_KNOWLEDGE_DIR=/tmp/aer-rt/knowledge
+            export AER_BACKUP_DIR=/tmp/aer-rt/backups
+            mkdir -p "${AER_DATA_DIR}"
+            alembic -x "db_path=${AER_DATA_DIR}/aer.db" upgrade head
+            backup="$(python /app/scripts/backup_sqlite.py --git-sha ci --print-path)"
+            echo "backup: ${backup}"
+            test -f "${backup}"
+            test -f "${backup}.json"
+            python /app/scripts/restore_sqlite.py \
+              --source-backup "${backup}" \
+              --target "${AER_DATA_DIR}/aer.db" \
+              --force
+            python /app/scripts/smoke_test.py --temp-db-check
+            echo "backup and restore round-trip OK"
+          '

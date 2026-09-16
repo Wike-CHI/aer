@@ -659,18 +659,30 @@ updated_at
 
 ## Task 5.2 — Experience Status Machine
 
-允许：
+状态词汇：
 
 ```text
 RAW
-VERIFIED
 DISTILLED
+VERIFIED
 REUSED
 PROVEN
 TRAINING_CANDIDATE
 TRAINING_DATA
 DEPRECATED
 ```
+
+当前允许的转换：
+
+```text
+RAW        → DISTILLED | DEPRECATED
+DISTILLED  → VERIFIED | DEPRECATED
+VERIFIED   → DEPRECATED
+DEPRECATED → （终态，无出边）
+```
+
+`REUSED` / `PROVEN` / `TRAINING_CANDIDATE` / `TRAINING_DATA` 目前**没有任何入边**：
+它们需要 `experience_usage` 统计（M7）。禁止自动晋升。
 
 实现明确状态转换规则。
 
@@ -680,7 +692,19 @@ DEPRECATED
 RAW
 →
 TRAINING_DATA
+
+RAW
+→
+PROVEN
+
+VERIFIED
+→
+TRAINING_CANDIDATE
 ```
+
+状态顺序说明：原文档写作 `RAW → VERIFIED → DISTILLED`，M5 修正为
+`RAW → DISTILLED → VERIFIED`。理由是验证针对的是**提炼出的陈述**，陈述不存在时
+无从验证。详见 `docs/DECISIONS.md` D-029 与 `agent.md #24`。
 
 ---
 

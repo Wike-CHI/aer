@@ -230,7 +230,13 @@ step prepare_directories
 # 1. Pull the exact image being deployed. Immutable tag, so this either gets the
 #    bytes CI built or fails -- it can never silently resolve to something newer.
 # ---------------------------------------------------------------------------
-step docker pull "${IMAGE}"
+# Fatal, and deliberately so: deploying a release that could not be fetched is
+# not a deployment. The hint matters because the host's registry credential is the
+# short-lived token the deploy workflow brings with it -- a pull failure on a host
+# nobody has deployed to recently is almost always that, not a broken image.
+if ! step docker pull "${IMAGE}"; then
+  die "cannot pull ${IMAGE}; if this host has not been deployed to recently its GHCR credential has probably expired (the deploy workflow refreshes it)"
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Back up the database, before anything can change the schema.

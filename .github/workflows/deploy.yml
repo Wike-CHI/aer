@@ -255,6 +255,30 @@ jobs:
           ssh "${SSH_OPTS[@]}" -p "${PRODUCTION_PORT}" "${target}" \
             'chmod 0755 /srv/aer/deploy/*.sh'
 
+      # The host needs read access to a private package. Rather than storing a
+      # long-lived PAT on the server, this job logs the host in with the token it
+      # already holds -- `secrets.GITHUB_TOKEN`, scoped to `packages: write` by the
+      # permissions block above, and expired by the time anyone could misuse it.
+      #
+      # The token is piped through stdin: it never appears in a command line (so it
+      # cannot land in a process listing or the remote shell history) and never in
+      # this workflow's logs. `docker login` stores it in the host's docker config,
+      # where it stays valid until it expires -- which is exactly long enough.
+      - name: Authenticate the host to GHCR with this job's token
+        env:
+          PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
+          PRODUCTION_USER: ${{ secrets.PRODUCTION_USER }}
+          PRODUCTION_PORT: ${{ secrets.PRODUCTION_PORT || '22' }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=yes
+                    -o UserKnownHostsFile="${HOME}/.ssh/known_hosts")
+          target="${PRODUCTION_USER}@${PRODUCTION_HOST}"
+          printf '%s' "${REGISTRY_TOKEN}" | ssh "${SSH_OPTS[@]}" -p "${PRODUCTION_PORT}" "${target}" \
+            "docker login ${REGISTRY} --username '${REGISTRY_USER}' --password-stdin"
+
       - name: Deploy over SSH
         env:
           PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}

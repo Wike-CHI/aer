@@ -191,13 +191,25 @@ GHCR 推送用的是 GitHub 自带的 `GITHUB_TOKEN`，不需要额外建 PAT（
 - 要求 `ci / quality gate` 通过（required status check）
 - 建议：要求分支为最新（require branches to be up to date）
 
-### 6.4 服务器侧的一次性 GHCR 登录
+### 6.4 服务器侧的镜像仓库凭据（零长期凭据）
 
-生产服务器拉取私有镜像需要 `read:packages` 权限。**手工登录一次**即可，不要在每次部署时把 token 通过命令行传给远程 shell（那会进入进程列表与 shell 历史）：
+**服务器上不保存任何长期凭据。** 私有镜像的拉取由部署工作流自己解决：它用本次运行自带的
+`GITHUB_TOKEN`（`permissions: packages: write` 隐含读权限）登录服务器，token 通过
+**stdin** 管道进入 `docker login`，既不进命令行（进程列表 / shell 历史）、也不进 CI 日志。
+该 token 在本次 job 结束后过期，服务器 `~/.docker/config.json` 里留下的是一份**已失效**
+的凭据。
 
-```bash
-echo "<只读 PAT 或 fine-grained token>" | docker login ghcr.io -u <github 用户名> --password-stdin
-```
+代价与应对：
+
+- **自动部署永远可用**：每次部署都会重新登录一次。
+- **服务器上手工执行 `deploy.sh`**：因为凭据多半已过期，拉取会失败。
+  `deploy.sh` 会明确提示这一点（"凭据可能已过期，部署工作流会刷新它"）。
+  需要手工部署时，先触发一次工作流，或在服务器上自行 `docker login ghcr.io`。
+- **`rollback.sh` 不受影响**：回滚目标镜像通常已在本机，脚本在拉取失败时会
+  自动退回本地副本（这正是事故现场最需要的行为），只在本地也没有时才报错。
+
+如果你更希望服务器长期具备拉取能力，可以改为自备一个只勾 `read:packages` 的
+classic PAT 并手工登录一次；本项目默认**不**这么做，因为那等于在服务器上常驻一个凭据。
 
 ---
 
@@ -338,7 +350,7 @@ docker compose -f compose.yaml run --rm aer-runtime \
 | 冒烟测试报 `directories.writable` 失败 | 宿主机目录属主不是 10001。执行第 4 节的 `chown`。 |
 | 冒烟测试报 `database.revision` 不匹配 | 数据库版本与镜像期望不同。**镜像回滚后属正常现象**，见第 10 节。 |
 | 冒烟测试报 `cannot read revision: ... alembic.ini` | 镜像里缺少 `alembic.ini` 或 `migrations/`。这是打包问题，请检查 `.dockerignore` 与 Dockerfile 的 `COPY`。 |
-| 拉取镜像 `denied` | 服务器未登录 GHCR，或凭据缺少 `read:packages`。见 6.4。 |
+| 拉取镜像 `unauthorized` / `denied` | 服务器上那份短期凭据已过期（正常现象）。触发一次部署工作流即可刷新；只回滚则不受影响，见 6.4。 |
 | 部署卡在 SSH | 检查 `PRODUCTION_KNOWN_HOSTS` 是否包含该主机的**当前**主机公钥（换过密钥会变化）。 |
 | 备份 sidecar 显示 `git_sha: unknown` | 调用备份时没传 `--git-sha`。`deploy.sh` 一定会传。 |
 | 想确认线上是哪个版本 | `cat /srv/aer/deploy/current.env` |

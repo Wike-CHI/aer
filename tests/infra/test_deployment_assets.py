@@ -486,6 +486,46 @@ class TestWorkflows:
         assert "StrictHostKeyChecking=yes" in document
         assert "PRODUCTION_KNOWN_HOSTS" in document
 
+    def test_the_host_is_authenticated_without_storing_a_long_lived_secret(
+        self, deploy: dict[str, Any]
+    ) -> None:
+        """The server holds no standing credential; CI brings a short-lived one.
+
+        Two properties: the token is written through stdin (never as a command-line
+        argument, where it would reach a process listing and the remote shell
+        history), and the login happens before the deployment that needs it.
+        """
+        steps = deploy["jobs"]["deploy"]["steps"]
+        logins = [step for step in steps if "docker login" in step.get("run", "")]
+
+        assert logins, "the deployment must authenticate the host to the registry"
+        for step in logins:
+            run = step["run"]
+            # Checked on the login command itself: the step also runs `ssh -p <port>`,
+            # and a job-wide `-p ` pattern would flag that unrelated flag.
+            login_line = next(line for line in run.splitlines() if "docker login" in line)
+            assert "--password-stdin" in login_line
+            # `--password X` / `-p X` would put the token in argv, where it lands in
+            # process listings and the remote shell history.
+            assert "--password " not in login_line
+            assert re.search(r"(^|\s)-p\s", login_line) is None
+            assert "secrets.GITHUB_TOKEN" in str(step.get("env", {}).values())
+
+        login_index = next(
+            index for index, step in enumerate(steps) if "docker login" in step.get("run", "")
+        )
+        deploy_index = next(
+            index for index, step in enumerate(steps) if step.get("name") == "Deploy over SSH"
+        )
+        assert login_index < deploy_index
+
+    def test_rollback_does_not_require_the_registry_for_a_local_image(self) -> None:
+        """Because the host's credential expires with the job that created it."""
+        document = read_repo_file("scripts/rollback.sh")
+
+        assert "docker image inspect" in document
+        assert "using the local copy" in document
+
     def test_only_one_tag_is_published_and_it_is_the_commit(self, deploy: dict[str, Any]) -> None:
         steps = deploy["jobs"]["publish"]["steps"]
         build = next(
@@ -538,15 +578,6 @@ class TestWorkflows:
         for workflow in (".github/workflows/ci.yml", ".github/workflows/deploy.yml"):
             match = pattern.search(read_repo_file(workflow))
             assert match is None, f"{workflow} enables command tracing: {match.group(0)!r}"
-
-    def test_deploy_does_not_pass_a_registry_token_to_the_server(self) -> None:
-        """The host authenticates itself once, with a read-only scope."""
-        document = read_repo_file(".github/workflows/deploy.yml")
-
-        assert (
-            "docker login" not in document or "PRODUCTION" not in document.split("docker login")[0]
-        )
-        assert "ghcr.io" not in document.split("Copy the deployment assets")[-1]
 
 
 class TestRepositoryHygiene:

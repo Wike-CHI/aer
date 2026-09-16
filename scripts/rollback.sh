@@ -160,7 +160,19 @@ step() {
   "$@"
 }
 
-step docker pull "${TARGET}"
+# The host's GHCR credential is the short-lived token CI last deployed with, so
+# it has usually expired by the time someone rolls back. Rolling back to an image
+# that is *already on this host* must therefore not depend on the registry at all
+# -- which is also the case that matters during an incident.
+if [[ "${DRY_RUN}" == "true" ]]; then
+  log "dry-run, would pull ${TARGET}"
+elif docker pull "${TARGET}"; then
+  log "pulled ${TARGET}"
+elif docker image inspect "${TARGET}" >/dev/null 2>&1; then
+  log "warning: cannot pull ${TARGET} (expired or absent registry credential); using the local copy"
+else
+  die "cannot pull ${TARGET} and no local copy exists; re-run the deploy workflow to refresh the credential"
+fi
 
 # A rollback is only complete once the old image has been shown to work against the
 # live database. The most likely failure is a schema that moved forward, which the

@@ -409,7 +409,7 @@ all 6 checks passed
 | 镜像不含数据 | ✅ 实测 `/app/data` 不存在，生产库只在 bind mount |
 | 镜像可回答"线上是哪个 commit" | ✅ `docker inspect` 的 `org.opencontainers.image.revision` = 该 commit |
 | 备份分支（迁移前备份） | ⚠️ 首次部署时数据库尚不存在，按设计跳过；第二次部署起生效 |
-| 回滚到上一版本 | ⚠️ 尚未有"上一版本"，第二次部署后才有可回滚目标 |
+| 回滚到上一版本 | ✅ 已实测（`rollback.sh`：dry-run + 真实回滚 + 滚回最新）。凭据已过期时自动退回本地镜像，仍在冒烟 6/6 通过 |
 | 真实故障恢复演练 | ⚠️ 未做（建议在正式使用前安排一次） |
 
 ---

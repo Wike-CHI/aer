@@ -300,13 +300,26 @@ class TestDockerfile:
         assert config.db_path.as_posix() == "/data/aer.db"
         assert config.backup_dir.as_posix() == "/backups"
 
+    def test_the_image_does_not_pin_a_database_file_that_overrides_the_directory(self) -> None:
+        """Setting both AER_DB_PATH and AER_DATA_DIR makes one of them a lie.
+
+        AER_DB_PATH wins in ``aer.config``, so a baked AER_DB_PATH would make every
+        later ``-e AER_DATA_DIR=...`` silently ineffective -- the class of mistake
+        the configuration module exists to prevent.
+        """
+        environment = baked_environment()
+
+        assert "AER_DATA_DIR" in environment
+        assert "AER_DB_PATH" not in environment, (
+            "baking AER_DB_PATH defeats any runtime AER_DATA_DIR override"
+        )
+
     def test_every_path_the_configuration_reads_is_absolute(self) -> None:
         """Every AER_* path must land inside a bind mount, not inside the image."""
         environment = baked_environment()
 
         for name in (
             "AER_DATA_DIR",
-            "AER_DB_PATH",
             "AER_ARTIFACT_DIR",
             "AER_KNOWLEDGE_DIR",
             "AER_BACKUP_DIR",

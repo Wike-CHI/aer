@@ -29,7 +29,8 @@ set -Eeuo pipefail
 # No `set -x`: this script reads the deployment record, and a trace would print it
 # into whatever log CI keeps.
 
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 resolve_deploy_dir() {
   if [[ -n "${AER_DEPLOY_DIR:-}" ]]; then
     printf '%s\n' "${AER_DEPLOY_DIR}"
@@ -41,10 +42,14 @@ resolve_deploy_dir() {
     printf '%s\n' "${SCRIPT_DIR}"
   fi
 }
-readonly DEPLOY_DIR="$(resolve_deploy_dir)"
-readonly COMPOSE_FILE="${DEPLOY_DIR}/compose.yaml"
-readonly ENV_FILE="${AER_ENV_FILE:-${DEPLOY_DIR}/.env}"
-readonly CURRENT_ENV="${DEPLOY_DIR}/current.env"
+DEPLOY_DIR="$(resolve_deploy_dir)"
+readonly DEPLOY_DIR
+COMPOSE_FILE="${DEPLOY_DIR}/compose.yaml"
+readonly COMPOSE_FILE
+ENV_FILE="${AER_ENV_FILE:-${DEPLOY_DIR}/.env}"
+readonly ENV_FILE
+CURRENT_ENV="${DEPLOY_DIR}/current.env"
+readonly CURRENT_ENV
 
 TO_ARG=""
 DRY_RUN=false
@@ -81,6 +86,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+[[ -f "${ENV_FILE}" ]] || die "environment file not found: ${ENV_FILE}"
+
+# Read the host-side settings before anything reads them back: AER_LOG_DIR and the
+# AER_HOST_* paths both live in this file. The AER_IMAGE it may contain is
+# deliberately overwritten below by the rollback target -- a rollback must never be
+# steered by a value left lying in a configuration file.
+set -a
+# shellcheck source=/dev/null
+. "${ENV_FILE}"
+set +a
+
 if [[ -n "${AER_LOG_DIR:-}" ]]; then
   mkdir -p -- "${AER_LOG_DIR}"
   exec > >(tee -a "${AER_LOG_DIR}/deploy.log") 2>&1
@@ -88,7 +104,6 @@ fi
 
 command -v docker >/dev/null 2>&1 || die "docker is not on PATH"
 [[ -f "${COMPOSE_FILE}" ]] || die "compose file not found: ${COMPOSE_FILE}"
-[[ -f "${ENV_FILE}" ]] || die "environment file not found: ${ENV_FILE}"
 
 if [[ ! -f "${CURRENT_ENV}" ]]; then
   # Explicitly not "guess from the image list": picking a rollback target is an

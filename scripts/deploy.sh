@@ -41,7 +41,8 @@ set -Eeuo pipefail
 # directory. Resolving instead of hard-coding means one script works in both and
 # nobody has to keep two copies in sync.
 # ---------------------------------------------------------------------------
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 resolve_deploy_dir() {
   if [[ -n "${AER_DEPLOY_DIR:-}" ]]; then
     printf '%s\n' "${AER_DEPLOY_DIR}"
@@ -53,10 +54,14 @@ resolve_deploy_dir() {
     printf '%s\n' "${SCRIPT_DIR}"
   fi
 }
-readonly DEPLOY_DIR="$(resolve_deploy_dir)"
-readonly COMPOSE_FILE="${DEPLOY_DIR}/compose.yaml"
-readonly ENV_FILE="${AER_ENV_FILE:-${DEPLOY_DIR}/.env}"
-readonly CURRENT_ENV="${DEPLOY_DIR}/current.env"
+DEPLOY_DIR="$(resolve_deploy_dir)"
+readonly DEPLOY_DIR
+COMPOSE_FILE="${DEPLOY_DIR}/compose.yaml"
+readonly COMPOSE_FILE
+ENV_FILE="${AER_ENV_FILE:-${DEPLOY_DIR}/.env}"
+readonly ENV_FILE
+CURRENT_ENV="${DEPLOY_DIR}/current.env"
+readonly CURRENT_ENV
 
 DRY_RUN=false
 KEEP="${AER_BACKUP_RETENTION:-20}"
@@ -100,25 +105,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# ---------------------------------------------------------------------------
-# Log to stdout always, and to a file when the host has a log directory. stdout is
-# what CI captures, so a log file is a convenience for on-call, never the record.
-# ---------------------------------------------------------------------------
-if [[ -n "${AER_LOG_DIR:-}" ]]; then
-  mkdir -p -- "${AER_LOG_DIR}"
-  exec > >(tee -a "${AER_LOG_DIR}/deploy.log") 2>&1
-fi
-
-log "deploy dir : ${DEPLOY_DIR}"
-log "dry run    : ${DRY_RUN}"
-
-command -v docker >/dev/null 2>&1 || die "docker is not on PATH; this host is not ready to deploy"
-[[ -f "${COMPOSE_FILE}" ]] || die "compose file not found: ${COMPOSE_FILE}"
 [[ -f "${ENV_FILE}" ]] || die "environment file not found: ${ENV_FILE} (start from deploy/env.example)"
-docker compose version >/dev/null 2>&1 || die "the docker compose plugin is missing"
 
 # ---------------------------------------------------------------------------
 # Read the host-side settings (bind-mount sources, log/backup locations).
+#
+# Done before the logging below, because AER_LOG_DIR lives in this same file: set
+# up the log first and a manual `bash ./deploy.sh` would quietly write nothing.
 #
 # `deploy/.env` is our own plain KEY=VALUE file, so sourcing it is safe here -- but
 # the *image* is deliberately not taken from it. A stale AER_IMAGE left in a file
@@ -133,6 +126,22 @@ set -a
 set +a
 IMAGE="${CALLER_IMAGE}"
 GIT_SHA="${CALLER_SHA}"
+
+# ---------------------------------------------------------------------------
+# Log to stdout always, and to a file when the host has a log directory. stdout is
+# what CI captures, so a log file is a convenience for on-call, never the record.
+# ---------------------------------------------------------------------------
+if [[ -n "${AER_LOG_DIR:-}" ]]; then
+  mkdir -p -- "${AER_LOG_DIR}"
+  exec > >(tee -a "${AER_LOG_DIR}/deploy.log") 2>&1
+fi
+
+log "deploy dir : ${DEPLOY_DIR}"
+log "dry run    : ${DRY_RUN}"
+
+command -v docker >/dev/null 2>&1 || die "docker is not on PATH; this host is not ready to deploy"
+[[ -f "${COMPOSE_FILE}" ]] || die "compose file not found: ${COMPOSE_FILE}"
+docker compose version >/dev/null 2>&1 || die "the docker compose plugin is missing"
 
 #: Container-side database path. Passed explicitly to Alembic as well as being part
 #: of the image environment, because the two failure modes are not equivalent: with

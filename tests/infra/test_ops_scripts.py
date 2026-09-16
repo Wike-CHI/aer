@@ -60,6 +60,19 @@ class TestShellHygiene:
         assert match is None, f"{name} traces commands: {match.group(0) if match else ''!r}"
 
     @pytest.mark.parametrize("name", SHELL_SCRIPTS)
+    def test_no_readonly_assignment_masks_an_exit_status(self, name: str) -> None:
+        """`readonly X="$(cmd)"` swallows cmd's failure, defeating `set -e`.
+
+        shellcheck reports this as SC2155 and the CI gate fails on it; asserted here
+        too, because shellcheck is not installed everywhere (it is only "used when
+        available" in CI) and this is precisely the guarantee the scripts rest on.
+        """
+        pattern = re.compile(r"^\s*readonly\s+\w+=\s*[\"\'$]")
+        offenders = [line for line in command_lines(script(name)) if pattern.match(line)]
+
+        assert offenders == [], offenders
+
+    @pytest.mark.parametrize("name", SHELL_SCRIPTS)
     def test_host_key_verification_is_never_disabled(self, name: str) -> None:
         assert "StrictHostKeyChecking=no" not in script(name)
 

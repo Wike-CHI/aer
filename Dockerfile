@@ -47,19 +47,13 @@ LABEL org.opencontainers.image.title="AER - Agent Experience Runtime" \
 # They are baked in so a bare `docker run` lands in the right place, and are
 # overridable per environment by deploy/env.example.
 #
-# AER_DB_PATH is set explicitly, not derived from AER_DATA_DIR, because Alembic's
-# own resolver (`migrations/env.py`) reads only AER_DB_PATH and otherwise falls back
-# to `./data/aer.db` -- relative to the working directory, i.e. *inside the image*.
-# A hand-run `docker compose run --rm aer-runtime alembic upgrade head` would then
-# dutifully create a second, empty database at /app/data/aer.db and leave the real
-# one untouched. deploy.sh also passes `-x db_path` for defence in depth.
-#
-# AER_DB_PATH is set explicitly rather than derived from AER_DATA_DIR, because
-# Alembic's own resolver (migrations/env.py) reads only AER_DB_PATH and otherwise
-# falls back to `./data/aer.db` -- relative to the working directory, i.e. inside the
-# image. A hand-run `docker compose run --rm aer-runtime alembic upgrade head` would
-# then create a second, empty database at /app/data/aer.db and leave the real one
-# untouched. deploy.sh passes `-x db_path` as well, for defence in depth.
+# Only AER_DATA_DIR is set, deliberately. Setting AER_DB_PATH *as well* would look
+# more explicit but is a trap: AER_DB_PATH wins in aer.config, so a later
+# `-e AER_DATA_DIR=/somewhere-else` would be silently ineffective and the process
+# would keep using /data/aer.db. One variable that means one place, honoured by the
+# runtime and by the Alembic CLI alike (migrations/env.py resolves AER_DATA_DIR too),
+# is worth more than two that can disagree. deploy.sh additionally passes
+# `-x db_path` to Alembic, for defence in depth.
 #
 # There are no credentials here and there never will be: the image is public
 # infrastructure, secrets arrive at runtime from the host environment.
@@ -69,7 +63,6 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     AER_ENV=production \
     AER_DATA_DIR=/data \
-    AER_DB_PATH=/data/aer.db \
     AER_ARTIFACT_DIR=/artifacts \
     AER_KNOWLEDGE_DIR=/knowledge \
     AER_BACKUP_DIR=/backups \

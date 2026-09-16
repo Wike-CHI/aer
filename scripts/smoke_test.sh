@@ -18,8 +18,10 @@ set -Eeuo pipefail
 # these scripts run on a host where a trace could surface values from the
 # environment into a CI log that is far more widely readable than the host.
 
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-readonly PYTHON_BIN="${AER_PYTHON:-python}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+PYTHON_BIN="${AER_PYTHON:-python}"
+readonly PYTHON_BIN
 
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
   echo "[smoke] FAILED: '${PYTHON_BIN}' not found; set AER_PYTHON to an interpreter" >&2

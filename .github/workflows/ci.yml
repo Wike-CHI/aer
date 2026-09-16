@@ -172,19 +172,43 @@ jobs:
             python -c "from aer.storage.migrations import head_revision; print(\"head\", head_revision())"
           '
 
-      # The write path, in a throwaway database inside the container: proves
-      # initialisation, migration and a real run round-trip without ever pointing
-      # at production data.
-      - name: Container smoke test (temporary database)
+      # The whole runtime story inside the *shipped image*: create a store with the
+      # CLI, write a real run, smoke-test it, back it up, restore it, smoke-test
+      # again. This is the step that proves the image -- not the source tree -- can
+      # do everything a deployment will ask of it, including that the Alembic CLI
+      # resolves the database from AER_DATA_DIR alone (no `-x` hint below, on
+      # purpose: that is the resolution the container relies on).
+      #
+      # Deliberately does not run the read-only production checks against a
+      # *missing* database: "there is no database here" is a legitimate failure for
+      # a real deployment, so the store is created first rather than teaching the
+      # smoke test to create one.
+      - name: "Container end-to-end: migrate, seed, back up, restore, smoke"
         run: |
-          docker run --rm \
-            --env AER_ENV=development \
-            --env AER_DATA_DIR=/tmp/aer-smoke \
-            --env AER_ARTIFACT_DIR=/tmp/aer-smoke/artifacts \
-            --env AER_KNOWLEDGE_DIR=/tmp/aer-smoke/knowledge \
-            --env AER_BACKUP_DIR=/tmp/aer-smoke/backups \
-            aer-ci:sha-0000000 \
+          set -Eeuo pipefail
+          docker run --rm --entrypoint sh aer-ci:sha-0000000 -c '
+            set -eu
+            export AER_ENV=development
+            export AER_DATA_DIR=/tmp/aer-e2e/data
+            export AER_ARTIFACT_DIR=/tmp/aer-e2e/artifacts
+            export AER_KNOWLEDGE_DIR=/tmp/aer-e2e/knowledge
+            export AER_BACKUP_DIR=/tmp/aer-e2e/backups
+            mkdir -p "${AER_DATA_DIR}"
+            alembic upgrade head
+            test -f "${AER_DATA_DIR}/aer.db"
+            python -c "from aer import AER; r = AER(\"${AER_DATA_DIR}\"); r.start_run(task=\"ci seed\", task_type=\"ci\").success(); print(\"seeded runs:\", r.runs.count()); r.close()"
             python /app/scripts/smoke_test.py --temp-db-check
+            backup="$(python /app/scripts/backup_sqlite.py --git-sha ci --print-path)"
+            echo "backup: ${backup}"
+            test -s "${backup}"
+            test -f "${backup}.json"
+            python /app/scripts/restore_sqlite.py \
+              --source-backup "${backup}" \
+              --target "${AER_DATA_DIR}/aer.db" \
+              --force
+            python /app/scripts/smoke_test.py --temp-db-check
+            echo "container end-to-end OK"
+          '
 
       # uid 10001 must own the data directories it is given. Checked without a bind
       # mount so it tests the image's own filesystem, independently of how any
@@ -201,30 +225,3 @@ jobs:
             done
           '
 
-      # Create a schema-only database with the CLI (no inline Python, no heredoc),
-      # then run the real ops scripts against it *inside the image*. This is what
-      # proves backup/restore work in the shipped artifact rather than only in the
-      # test environment -- including the sibling import in restore_sqlite.py.
-      - name: Backup and restore round-trip inside the container
-        run: |
-          set -Eeuo pipefail
-          docker run --rm --entrypoint sh aer-ci:sha-0000000 -c '
-            set -eu
-            export AER_ENV=development
-            export AER_DATA_DIR=/tmp/aer-rt/data
-            export AER_ARTIFACT_DIR=/tmp/aer-rt/artifacts
-            export AER_KNOWLEDGE_DIR=/tmp/aer-rt/knowledge
-            export AER_BACKUP_DIR=/tmp/aer-rt/backups
-            mkdir -p "${AER_DATA_DIR}"
-            alembic -x "db_path=${AER_DATA_DIR}/aer.db" upgrade head
-            backup="$(python /app/scripts/backup_sqlite.py --git-sha ci --print-path)"
-            echo "backup: ${backup}"
-            test -f "${backup}"
-            test -f "${backup}.json"
-            python /app/scripts/restore_sqlite.py \
-              --source-backup "${backup}" \
-              --target "${AER_DATA_DIR}/aer.db" \
-              --force
-            python /app/scripts/smoke_test.py --temp-db-check
-            echo "backup and restore round-trip OK"
-          '

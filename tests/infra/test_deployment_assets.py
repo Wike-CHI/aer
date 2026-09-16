@@ -395,6 +395,39 @@ class TestWorkflows:
         assert "smoke_test.py --temp-db-check" in commands
         assert "docker compose --file deploy/compose.yaml config" in commands
 
+    def test_the_container_job_creates_the_database_before_smoking_it(
+        self, ci: dict[str, Any]
+    ) -> None:
+        """Order inside the container job, asserted because it was got wrong twice.
+
+        The production smoke test treats a missing database as a failure -- which is
+        correct for a deployment and wrong for a job whose whole point is "can this
+        image create and use a store?". So the job has to migrate first, and the
+        first `smoke_test.py` invocation must come after that.
+        """
+        steps = ci["jobs"]["container"]["steps"]
+        # Compared *within one step*: an earlier step legitimately mentions
+        # smoke_test.py (it asserts the image ships the file), so comparing across
+        # the whole job would compare unrelated commands.
+        runners = [
+            step["run"]
+            for step in steps
+            if "alembic upgrade head" in step.get("run", "")
+            and "smoke_test.py" in step.get("run", "")
+        ]
+
+        assert runners, "the container job must migrate and smoke in the same step"
+        for run in runners:
+            assert run.index("alembic upgrade head") < run.index("smoke_test.py")
+
+            # The Alembic run must stand on its own: if it needed `-x db_path`, the
+            # container would be relying on something the deployment also has to
+            # remember, and the AER_DATA_DIR resolution would go untested.
+            alembic_line = next(
+                line for line in run.splitlines() if line.strip().startswith("alembic upgrade head")
+            )
+            assert "-x" not in alembic_line
+
     def test_ci_covers_the_quality_gate(self, ci: dict[str, Any]) -> None:
         commands = "\n".join(step.get("run", "") for step in ci["jobs"]["quality-gate"]["steps"])
 

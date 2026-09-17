@@ -279,8 +279,10 @@ scripts/                      # 运维入口点（按文件执行，不是可导
 ├── deploy.sh                 # 备份 → 迁移 → 冒烟 → 记录 current.env
 ├── rollback.sh               # 只切镜像；不自动降级数据库
 ├── drill_facts.py            # 只读：事实/行数/完整性/代表性记录（演练用，不可能写入）
-├── drill_compare.py          # 字节差异定位 + 逻辑等价比较（演练用）
-└── drill_seed.py             # 在演练沙箱内播种每类记录各一条（演练用）
+├── drill_compare.py          # 字节差异定位 + 逻辑等价比较；--shared-tables 用于跨版本
+├── drill_seed.py             # 在演练沙箱内播种每类记录各一条（演练用）
+├── drill_seed_revision.py    # 版本感知播种：旧 revision 的库绝不用当前 Runtime 写
+└── drill_runtime_probe.py    # 当前 Runtime 读+写探测；默认拒绝打开非 head 的库
 
 .github/workflows/
 ├── ci.yml                    # PR：质量门禁 + 全新库迁移 + 镜像构建 + 容器冒烟
@@ -411,8 +413,11 @@ docker compose -f compose.yaml run --rm aer-runtime python /app/scripts/smoke_te
 ```
 
 **灾备不是承诺，是已执行过的事实**：备份已在隔离目录被真实恢复、迁移，并由线上镜像冒烟
-通过（6/6）；恢复也可以直接从**只读挂载**的备份进行，那是灾难现场的常态。完整记录与
-复跑步骤见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) 第 15 节。
+通过（6/6）；恢复也可以直接从**只读挂载**的备份进行，那是灾难现场的常态。
+
+**跨版本恢复也已验证**：一份 revision `0003` 的备份，经当前镜像恢复后前向迁移到 head
+（`0004`），历史记录逐字段保全、新表为空、当前 Runtime 既能读旧数据也能继续写新数据。
+记录见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) 第 15、16 节。
 
 三条必须知道的边界：
 

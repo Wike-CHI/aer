@@ -653,8 +653,8 @@ docker run --rm \
 诚实列出边界，比让读者以为「演练过了就都安全」有用：
 
 - **生产库 0 行**，所以记录保全只能在人工播种的数据上验证（15.4）。
-- **跨 revision 恢复未演练**：本次备份的 revision 恰好等于 head（`0004`）。真实灾难中要恢复的
-  往往是一份**更旧**的备份，那条「恢复 → 前滚迁移到 head」的路径没有被验证过。
+- ~~**跨 revision 恢复未演练**~~：**已由第 16 节补上**（2026-09-17）。当时这条限制是真的：
+  本次备份的 revision 恰好等于 head（`0004`），而真实灾难中要恢复的往往是一份**更旧**的备份。
 - **同机同盘**：恢复目标与备份都在 `/srv`（同一块磁盘）。未验证跨机器、跨介质、从异地副本恢复。
 - **没有周期性备份**，见 15.6 的 RPO。
 - **未演练**：备份介质损坏/丢失、整机重建、`restore_sqlite.py` 在真实生产路径
@@ -695,9 +695,174 @@ docker run --rm \
 
 第二次复测的全部输出保存在服务器 `/srv/aer/drill/logs/drill-postdeploy-20260917T035922Z.log`。
 
+## 16. 跨版本恢复演练（Cross-Revision Recovery Drill）
+
+演练日期：**2026-09-17**。这一轮只回答一个问题：
+
+> 当生产只能恢复出一个**旧版本**的 SQLite 数据库时，当前版本的 AER 能否把它安全迁移到
+> head，同时保留历史事实，并继续正常工作？
+
+答案是 **YES**：23 项验收全部通过。所有操作在
+`/srv/aer/drill-cross-revision/` 完成，生产库全程只读。
+
+### 16.1 结果摘要
+
+| 项 | 值 |
+| --- | --- |
+| 演练日期 | 2026-09-17 |
+| Source Revision | `0003`（从**空库**用该旧版 Migration 构建，**没有**对任何现有库 `downgrade`） |
+| Target Revision | `0004`（由 `alembic heads` 确定，代码里未硬编码） |
+| Image | `ghcr.io/wike-chi/aer:sha-af13c73e5144fe8640ffaf6c79b3fc80b0072e9e`（当前线上镜像） |
+| 历史记录保全 | ✅ 2 runs / 11 events / 1 error / 1 recovery / 1 verification，**逐表行数、共有表 DDL、每表内容摘要、抽样行字段**全部一致 |
+| 新 Schema 状态 | ✅ `experiences` 与 `experience_sources` 存在且**各 0 行**（迁移只建 schema，不造业务数据） |
+| Runtime 读 | ✅ 打开成功（revision 0004），`verified_success=true`、error `resolved`、recovery `success`、verdict `passed` 全部读回 |
+| Runtime 写 | ✅ 新建 run + 验证通过；经验管线产出 `SUCCESS/VERIFIED` 经验（1 条 source）；计数 3 runs / 1 experience |
+| Smoke | ✅ 迁移**前** exit 1 且**未修改**该库；迁移**后** 6/6 通过，exit 0 |
+| Production 影响 | ✅ 数据库 sha256 `f1d72ef6…` 与 mtime `1789550139` 演练前后一致 |
+| 实际耗时 | **64 秒**（19 个步骤，含 11 次容器启动） |
+
+### 16.2 演练链路（第 30 节验收，逐段真实执行）
+
+```text
+Revision 0003 DB（空库 + 旧版 Migration 构建）
+  ↓  播种 0003 当时 Schema 能容纳的记录（版本感知，不用当前 Runtime）
+Official Backup            → integrity ok，sidecar 记录 revision 0003
+  ↓  删除源库（此后备份是唯一副本）
+Official Restore（当前镜像）→ 仍是 0003，行数与源一致
+  ↓
+Current Image Migration    → alembic upgrade head，exit 0
+  ↓
+Revision current head      → 0004 == alembic heads
+  ↓
+Historical Data Preserved  → 行数 / DDL / 内容摘要 / 抽样字段 全部一致
+  ↓
+Current Runtime Reads      → 历史 run、错误已解决、恢复成功、验证通过
+  ↓
+Current Runtime Writes     → 新 run + 验证 + 经验（SUCCESS/VERIFIED）
+  ↓
+Experience Pipeline Works  → experience_sources 建立关联
+  ↓
+Smoke PASS                 → 6/6
+  ↓
+Restart（新进程）          → 3 runs（2 历史 + 1 新）、revision 0004、integrity ok
+```
+
+### 16.3 历史事实保全：比了什么
+
+「备份恢复出来了」和「历史还在」是两件事。本轮四层都比：
+
+1. **逐表行数**：迁移前后 `runs`/`events`/`errors`/`recoveries`/`verifications` 完全相同；
+2. **共有表的 DDL**：每张表的 `CREATE TABLE` 语句与索引定义逐字比较
+   （`drill_compare --shared-tables`，见 16.9 —— 这一层是本轮补上的，只比内容会漏掉列定义漂移）；
+3. **每表内容摘要**：按 `rowid` 排序后的内容哈希，`logical_equal = true`；
+4. **抽样行逐字段**：5 张表各取一行，**字段级**比较，`mismatches: none`。
+
+`tables_only_in_a = []`——迁移没有丢掉任何一张表。两个文件当然不算逐字节相同（相差 44680
+字节）：迁移本来就**应该**新增两张表。
+
+### 16.4 新 Schema 的默认状态
+
+`experiences` 与 `experience_sources` 在迁移后**存在且为空**。这一条单独验证，是因为一个
+「迁移顺手造了几条假业务数据」的 bug，比「迁移丢数据」更难发现，也更难解释。
+
+### 16.5 当前 Runtime 的读与写
+
+读（历史）与写（现在）是两种不同的能力，分别验证：
+
+- **读**：打开迁移后的库，两个历史 run 都能取到；`verified_success` 为真，错误 `resolved`
+  为真，恢复 `success` 为真，验证 `passed` 为真——**关系**（哪条 recovery 修好了哪个 error、
+  哪条 verification 属于哪个 run）都还在。
+- **写**：新建一个 run、对它做验证、蒸馏出经验，得到 `SUCCESS/VERIFIED` 经验与 1 条
+  `experience_sources`。旧数据与新数据**共存**（3 runs / 1 experience）。
+
+### 16.6 冒烟测试在迁移前后的行为
+
+这是本轮暴露缺陷的地方，因此单独记录：
+
+| 时机 | 结果 |
+| --- | --- |
+| 迁移**前**（库在 0003） | `database.revision` 与 `runtime.open` 判失败，**exit 1**，并且**库仍然是 0003 / 6 张表**——没有被冒烟测试改掉 |
+| 迁移**后** | 6/6 通过，`runtime.open: runs=3 experiences=1`，exit 0 |
+
+迁移前那两条 FAIL 是**正确行为**：这个镜像期望 head，库不是，部署就不该被判定成功。而
+「未修改该库」这一条是**修出来的**——见 16.9。
+
+### 16.7 失败与可重复性
+
+- **备份可重复使用**：同一份 0003 备份再恢复一次，仍是 0003 且行数与源一致。
+- **不能写入的迁移失败且不留痕**：在**只读挂载**上执行 `alembic upgrade head`，exit 1，
+  库仍然是 0003、`integrity_check` 仍为 `ok`。半迁移的数据库没有被当作可以「修一下继续」的东西。
+- 演练副本当场删除，备份 sha256 全程不变。
+
+### 16.8 对 RPO / RTO 的补充
+
+上一轮（第 15.6 节）留下的最大缺口是「跨 revision 恢复未演练」。本轮把它补上：
+
+- **RPO 不变**：备份仍然只在部署时产生（迁移之前）。现在多了一条底气——**迁移前那份备份
+  是可用恢复点**，即使它比当前 head 旧。这正是 `deploy.sh` 备份早于迁移的意义。
+- **RTO 的跨版本部分**：从「恢复旧备份」到「库在 head 且冒烟通过」= 恢复 + `upgrade head` +
+  冒烟。本轮实测 64 秒完成 19 个步骤（含 11 次容器启动），其中迁移本身是秒级。
+- **一条新的运维事实**：旧备份的 sidecar 里写着它自己的 `alembic_revision`。恢复一份旧备份后，
+  你能从 sidecar 知道它是哪个版本，而不必去猜。
+
+### 16.9 本轮发现并修复的缺陷
+
+| # | 缺陷 | 后果 | 处理 |
+| --- | --- | --- | --- |
+| 1 | `smoke_test.py` 自称 strictly read-only，但会把**非 head 的库迁移到 head** | 恢复旧备份后，文档推荐的第一步排障命令会**在你看到 revision 之前把库改掉**，拿走唯一一次「迁移前确认版本」的机会 | 已修：revision 检查未通过时不尝试打开，并记为**未满足**而不是通过。新增 3 条回归测试，已验证在修复前失败（`the smoke test migrated the database`） |
+| 2 | `drill_compare --shared-tables` 只比内容，不比 Schema | 一个只改列定义、不动数据的迁移会被判为「完全保全」 | 已修：同时比较每张表的 `CREATE TABLE` 与索引定义。新增 2 条测试（新增表不算差异、改列定义必须被抓到） |
+
+缺陷 1 值得多写一句：它的**退出码一直是对的**（有失败即 1），文档承诺的也是对的，错的是
+「只读」这半句承诺。一份自相矛盾的输出——前半句说「你这个库版本不对」，后半句把它改成对的
+——比单纯报错更危险，因为它销毁了证据。
+
+### 16.10 复跑这次演练
+
+四个检查工具已随镜像发布（`scripts/drill_{facts,compare,seed_revision,runtime_probe}.py`）。
+关键用法：
+
+```bash
+IMAGE=$(sed -n 's/^AER_IMAGE=//p' /srv/aer/deploy/current.env)
+
+# 1. 从空库构建旧 revision（绝不 downgrade 现有库），目录属主必须是 10001
+install -d -m 0750 -o 10001 -g 10001 /srv/aer/drill-cross-revision/source-0003/data
+docker run --rm -v /srv/aer/drill-cross-revision/source-0003/data:/data "$IMAGE" alembic upgrade 0003
+
+# 2. 版本感知地播种（会拒绝：revision 不符 / 表非空 / 列不存在）
+docker run --rm --entrypoint python \
+  -v /srv/aer/drill-cross-revision/source-0003/data:/data \
+  "$IMAGE" /app/scripts/drill_seed_revision.py /data --revision 0003 --json
+
+# 3. 正式备份 → 删源 → 正式恢复（见第 9、11 节）
+# 4. 前向迁移
+docker run --rm -v <restored-data>:/data "$IMAGE" alembic upgrade head
+
+# 5. 只比共有表（DDL + 内容），并让当前 Runtime 读+写一次
+docker run --rm --entrypoint python -v <backup-dir>:/backups:ro -v <restored-data>:/data:ro \
+  "$IMAGE" /app/scripts/drill_compare.py /backups/<bk>.db /data/aer.db \
+    --a-immutable --b-immutable --shared-tables
+docker run --rm --entrypoint python -v <restored-data>:/data \
+  "$IMAGE" /app/scripts/drill_runtime_probe.py /data --write --json
+```
+
+编排脚本（`xrev_drill.sh`）与判定器（`xrev_judge.py`）在
+`/srv/aer/drill-cross-revision/`，属站点专属脚本，未入库。判定器只读证据文件、不重跑任何步骤
+——否则一次偶然的成功会顶替实际记录下来的东西。
+
+### 16.11 本次演练**没有**覆盖的
+
+- **只验证了 0003 → 0004 这一条边**（按第 2 节要求）。0001/0002 起步的迁移路径由
+  `tests/storage/test_migrations.py` 覆盖，但不是在真实服务器上用镜像跑的。
+- **没有跨大版本**：`0003 → 0004` 是纯增量迁移（只加表），所以「迁移重写既有行」这一类风险
+  没有被真正施压。未来若出现破坏性迁移，需要专门演练。
+- **同机同盘**：备份、恢复目标仍在同一块磁盘上。
+- **没有周期性备份**：RPO 仍等于「距最近一次成功部署」，见 15.6。
+- 旧库由 Alembic 构建，**不是**从一份真实的旧生产备份恢复的——因为线上从未运行过 0003
+  （生产库是部署当天直接建到 0004 的）。这一点无法用演练弥补，只能等真实历史积累。
+
 ---
 
-## 16. 本轮明确不做的事
+## 17. 本轮明确不做的事
 
 不做，是因为当前只有一台服务器，也因为本轮的目的是"能可靠地构建、验证、发布、迁移、备份和回滚"，而不是堆基础设施：
 

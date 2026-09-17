@@ -211,6 +211,60 @@ class TestDrillCompare:
         assert report["logical_equal"] is True
 
 
+class TestSharedTablesMode:
+    """For a cross-revision drill: what a migration must leave alone.
+
+    Comparing everything would report "different" for a migration that did exactly
+    what it promised, because a migration is *supposed* to add tables and bump the
+    revision. Comparing only what both files have is the meaningful question.
+    """
+
+    @staticmethod
+    def make_pair(tmp_path: Path, ddl_b: str) -> tuple[Path, Path]:
+        """Two files: same table, same rows, different CREATE TABLE statement."""
+        a, b = tmp_path / "a.db", tmp_path / "b.db"
+        for path, ddl in ((a, "CREATE TABLE t (id TEXT PRIMARY KEY, n INTEGER)"), (b, ddl_b)):
+            with sqlite3.connect(path) as connection:
+                connection.execute(ddl)
+                connection.execute("INSERT INTO t VALUES ('row-1', 5)")
+                connection.execute("INSERT INTO t VALUES ('row-2', 7)")
+                connection.commit()
+        return a, b
+
+    def test_added_tables_do_not_make_the_shared_tables_different(
+        self, tmp_path: Path, drill_compare: ModuleType, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        old, new = self.make_pair(tmp_path, "CREATE TABLE t (id TEXT PRIMARY KEY, n INTEGER)")
+        with sqlite3.connect(new) as connection:
+            connection.execute("CREATE TABLE added (id TEXT PRIMARY KEY)")
+            connection.commit()
+
+        full = run_json(drill_compare, [str(old), str(new)], capsys)
+        shared = run_json(drill_compare, [str(old), str(new), "--shared-tables"], capsys)
+
+        assert full["logical_equal"] is False
+        assert shared["logical_equal"] is True
+        assert shared["tables_only_in_b"] == ["added"]
+        assert shared["tables_only_in_a"] == []
+
+    def test_a_changed_table_definition_is_detected(
+        self, tmp_path: Path, drill_compare: ModuleType, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The rows are byte-for-byte identical here; only the DDL differs.
+
+        A comparison built on row digests alone would call this preserved, and it
+        would be wrong: the column now has a default that the old schema did not.
+        """
+        old, new = self.make_pair(
+            tmp_path, "CREATE TABLE t (id TEXT PRIMARY KEY, n INTEGER DEFAULT 0)"
+        )
+
+        shared = run_json(drill_compare, [str(old), str(new), "--shared-tables"], capsys)
+
+        assert shared["logical"]["a"]["contents"] == shared["logical"]["b"]["contents"]
+        assert shared["logical_equal"] is False
+
+
 class TestDrillSeed:
     """The sandbox store that gives the preservation check something to preserve."""
 

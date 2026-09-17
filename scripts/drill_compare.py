@@ -74,6 +74,9 @@ def compare(
     report["tables_only_in_a"] = sorted(set(contents_a) - set(contents_b))
     report["tables_only_in_b"] = sorted(set(contents_b) - set(contents_a))
 
+    defs_a: dict[str, object] = dict(logical_a["definitions"])  # type: ignore[arg-type]
+    defs_b: dict[str, object] = dict(logical_b["definitions"])  # type: ignore[arg-type]
+
     report["shared_tables_only"] = shared_tables_only
     if shared_tables_only:
         # `alembic_version` is excluded deliberately: its whole job is to change
@@ -82,16 +85,23 @@ def compare(
         shared = (set(contents_a) & set(contents_b)) - {"alembic_version"}
         contents_a = {table: contents_a[table] for table in sorted(shared)}
         contents_b = {table: contents_b[table] for table in sorted(shared)}
-        logical_a = {"contents": contents_a}
-        logical_b = {"contents": contents_b}
+        defs_a = {table: defs_a[table] for table in sorted(shared) if table in defs_a}
+        defs_b = {table: defs_b[table] for table in sorted(shared) if table in defs_b}
+        logical_a = {"contents": contents_a, "definitions": defs_a}
+        logical_b = {"contents": contents_b, "definitions": defs_b}
 
     report["logical"] = {"a": logical_a, "b": logical_b}
-    report["logical_equal"] = contents_a == contents_b
+    report["logical_equal"] = contents_a == contents_b and defs_a == defs_b
     return report
 
 
 def _logical(path: str, immutable: bool) -> dict[str, object]:
-    """Schema text plus a per-table content digest, ordered deterministically."""
+    """Per-table definitions and content digests, ordered deterministically.
+
+    ``definitions`` carries each table's ``CREATE TABLE`` statement and its indexes.
+    Content alone cannot support a cross-revision claim: a migration could change a
+    column definition without touching a single row.
+    """
     query = "mode=ro&immutable=1" if immutable else "mode=ro"
     with closing(sqlite3.connect(f"file:{Path(path).as_posix()}?{query}", uri=True)) as conn:
         schema = conn.execute(
@@ -100,7 +110,9 @@ def _logical(path: str, immutable: bool) -> dict[str, object]:
         tables = [
             row[1] for row in schema if row[0] == "table" and not row[1].startswith("sqlite_")
         ]
+        sql_by_name = {str(row[1]): str(row[2]) for row in schema}
         contents: dict[str, object] = {}
+        definitions: dict[str, object] = {}
         for table in tables:
             rows = conn.execute(f'SELECT * FROM "{table}" ORDER BY rowid').fetchall()
             payload = json.dumps(
@@ -109,7 +121,15 @@ def _logical(path: str, immutable: bool) -> dict[str, object]:
                 default=repr,
             ).encode()
             contents[table] = {"rows": len(rows), "digest": _digest(payload)}
-    return {"schema": schema, "contents": contents}
+            indexes = conn.execute(f'PRAGMA index_list("{table}")').fetchall()
+            definitions[table] = {
+                "table": sql_by_name.get(str(table), ""),
+                "indexes": {
+                    str(index[1]): sql_by_name.get(str(index[1]), "")
+                    for index in sorted(indexes, key=lambda row: str(row[1]))
+                },
+            }
+    return {"schema": schema, "contents": contents, "definitions": definitions}
 
 
 def _normalise(value: object) -> object:

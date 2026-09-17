@@ -303,6 +303,36 @@ jobs:
           ssh "${SSH_OPTS[@]}" -p "${PRODUCTION_PORT}" "${target}" \
             "cd /srv/aer/deploy && IMAGE='${RELEASE_IMAGE}' GIT_SHA='${RELEASE_SHA}' AER_LOG_DIR=/srv/aer/logs bash ./deploy.sh"
 
+      # The host stops needing the registry the moment the image is on disk, so the
+      # credential is removed rather than left to expire there. A disaster-recovery
+      # drill found the deployment's short-lived `GITHUB_TOKEN` still sitting in
+      # `/root/.docker/config.json` hours after the pull that needed it -- a
+      # credential nobody was using and nobody was watching.
+      #
+      # `always()`, because a failed deployment must not leave it behind either.
+      # The step still reports success when the removal cannot be confirmed, and
+      # only warns: cleanup must not be able to turn a successful release into a
+      # failed one, nor to bury a failure that already happened.
+      - name: Remove the host's registry credential
+        if: always()
+        env:
+          PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
+          PRODUCTION_USER: ${{ secrets.PRODUCTION_USER }}
+          PRODUCTION_PORT: ${{ secrets.PRODUCTION_PORT || '22' }}
+        run: |
+          set -Eeuo pipefail
+          SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=yes
+                    -o UserKnownHostsFile="${HOME}/.ssh/known_hosts")
+          target="${PRODUCTION_USER}@${PRODUCTION_HOST}"
+          # The pull has already happened by now -- that is the only reason the
+          # credential existed -- so nothing on the host needs it any more.
+          if ssh "${SSH_OPTS[@]}" -p "${PRODUCTION_PORT}" "${target}" \
+            "docker logout '${REGISTRY}' && ! grep -q '${REGISTRY}' /root/.docker/config.json"; then
+            echo "the host no longer holds a ${REGISTRY} credential"
+          else
+            echo "::warning::could not confirm the ${REGISTRY} credential was removed from ${PRODUCTION_HOST}; inspect /root/.docker/config.json"
+          fi
+
       - name: Report the deployed release
         env:
           RELEASE_IMAGE: ${{ needs.prepare.outputs.image }}

@@ -48,7 +48,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backup_sqlite import (
     BackupError,
     clear_wal_sidecars,
-    integrity_check,
     require_intact,
     wal_sidecars,
 )
@@ -88,8 +87,17 @@ def clear_write_ahead_logs(db_path: str | Path) -> list[Path]:
         raise RestoreError(str(exc)) from exc
 
 
-def restore_backup(source_backup: str | Path, target: str | Path, *, force: bool = False) -> Path:
+def restore_backup(
+    source_backup: str | Path, target: str | Path, *, force: bool = False
+) -> tuple[Path, str]:
     """Restore ``source_backup`` onto ``target`` using the SQLite backup API.
+
+    Returns ``(destination, integrity_verdict)``. The verdict is returned rather
+    than recomputed by the caller on purpose: recomputing it means opening the
+    restored file once more *after* the ``-wal``/``-shm`` cleanup has run, which
+    recreates the very sidecars that cleanup exists to remove. A
+    disaster-recovery drill caught exactly that, so the last open now happens
+    here, immediately before the last cleanup.
 
     Raises:
         RestoreError: the request was refused (missing/invalid arguments, existing
@@ -135,14 +143,15 @@ def restore_backup(source_backup: str | Path, target: str | Path, *, force: bool
     # replay a write-ahead log that belongs to the database we replaced.
     clear_write_ahead_logs(destination)
 
-    _require_intact(destination, label="restored database")
+    verdict = _require_intact(destination, label="restored database")
 
     # ...and clear once more, this time *after* the last open. Verification opens
     # the restored file read-only, and a read-only connection cannot checkpoint, so
     # SQLite deliberately leaves the ``-wal``/``-shm`` it created behind. Clearing
-    # before the last open would be undone by it.
+    # before the last open would be undone by it -- which is why nothing may open
+    # the target after this point.
     clear_write_ahead_logs(destination)
-    return destination
+    return destination, verdict
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -189,14 +198,16 @@ def main(argv: list[str] | None = None) -> int:
                 "target_exists": args.target.exists(),
             }
         else:
-            restore_backup(args.source_backup, args.target, force=args.force)
+            _, target_integrity = restore_backup(args.source_backup, args.target, force=args.force)
             log(f"restored {args.source_backup.as_posix()} -> {args.target.as_posix()}")
             report = {
                 "dry_run": False,
                 "source_backup": args.source_backup.as_posix(),
                 "target": args.target.as_posix(),
                 "backup_integrity": source_integrity,
-                "target_integrity": integrity_check(args.target),
+                # Taken from the restore itself: re-checking here would open the
+                # target again and recreate the write-ahead files just removed.
+                "target_integrity": target_integrity,
                 "stale_wal_files": [p.name for p in pre_existing],
                 "target_bytes": args.target.stat().st_size,
             }

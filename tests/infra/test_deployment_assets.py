@@ -523,6 +523,36 @@ class TestWorkflows:
         )
         assert login_index < deploy_index
 
+    def test_the_hosts_registry_credential_is_removed_after_the_pull(
+        self, deploy: dict[str, Any]
+    ) -> None:
+        """A short-lived token must not outlive the deployment that needed it.
+
+        The drill found the job's ``GITHUB_TOKEN`` still sitting in the host's
+        ``/root/.docker/config.json`` hours later. It does expire on its own, but
+        until it does it is a credential nobody is using and nobody is watching, on
+        a host reachable from the internet.
+        """
+        steps = deploy["jobs"]["deploy"]["steps"]
+        logout_index = next(
+            index for index, step in enumerate(steps) if "docker logout" in step.get("run", "")
+        )
+        deploy_index = next(
+            index for index, step in enumerate(steps) if step.get("name") == "Deploy over SSH"
+        )
+        login_indices = [
+            index for index, step in enumerate(steps) if "docker login" in step.get("run", "")
+        ]
+
+        assert login_indices, "there is nothing to log out of without a login"
+        # The pull must already have happened: logging out first would break the
+        # deployment that the cleanup is tidying up after.
+        assert max(login_indices) < deploy_index < logout_index
+        # A cleanup that only runs on the happy path is not a cleanup.
+        assert steps[logout_index].get("if") == "always()"
+        # It must confirm the credential is gone rather than assume the logout worked.
+        assert "grep" in steps[logout_index]["run"]
+
     def test_rollback_does_not_require_the_registry_for_a_local_image(self) -> None:
         """Because the host's credential expires with the job that created it."""
         document = read_repo_file("scripts/rollback.sh")

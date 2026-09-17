@@ -66,6 +66,24 @@ def smoke_test() -> ModuleType:
     return load_script("smoke_test")
 
 
+@pytest.fixture(scope="session")
+def drill_facts() -> ModuleType:
+    """The ``drill_facts`` module: read-only database inspection for drills."""
+    return load_script("drill_facts")
+
+
+@pytest.fixture(scope="session")
+def drill_compare() -> ModuleType:
+    """The ``drill_compare`` module: byte-level and logical file comparison."""
+    return load_script("drill_compare")
+
+
+@pytest.fixture(scope="session")
+def drill_seed() -> ModuleType:
+    """The ``drill_seed`` module: a sandbox store holding one of every record."""
+    return load_script("drill_seed")
+
+
 @pytest.fixture
 def ops_root(tmp_path: Path) -> Path:
     """An isolated stand-in for ``/srv/aer``: data, artifacts, knowledge, backups."""

@@ -57,12 +57,14 @@ Infrastructure — Repo / Docker / CI / CD / Backup  ✅
 - **可部署制品**：`Dockerfile`（非 root、可丢弃、OCI 标签带 commit）、
   `deploy/compose.yaml`、`scripts/{deploy,rollback,smoke_test}.sh`、
   `scripts/{backup,restore}_sqlite.py`、`.github/workflows/{ci,deploy}.yml`
+- **灾备可验证**：备份/恢复工具、`scripts/drill_{facts,compare,seed}.py`
+  与已真实执行过的[灾难恢复演练](docs/DEPLOYMENT.md#15-灾难恢复演练disaster-recovery-drill)
 
 尚未实现（后续 Milestone）：Retrieval（FTS5 / Embedding）、Experience Injection、
 Experience Usage、Workflow、Dataset、完整 Sanitizer、Artifact、CLI、FastAPI、
 Dashboard、模型训练。
 
-本轮**刻意不做**（见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) 第 15 节）：
+本轮**刻意不做**（见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) 第 16 节）：
 Kubernetes / Helm / Terraform / Ansible、Redis / Kafka / PostgreSQL、
 日志聚合与指标系统、HTTP healthcheck、NeuG。
 
@@ -275,7 +277,10 @@ scripts/                      # 运维入口点（按文件执行，不是可导
 ├── smoke_test.py             # 生产冒烟：只读校验 + 临时库写路径校验
 ├── smoke_test.sh             # 上面脚本的薄封装
 ├── deploy.sh                 # 备份 → 迁移 → 冒烟 → 记录 current.env
-└── rollback.sh               # 只切镜像；不自动降级数据库
+├── rollback.sh               # 只切镜像；不自动降级数据库
+├── drill_facts.py            # 只读：事实/行数/完整性/代表性记录（演练用，不可能写入）
+├── drill_compare.py          # 字节差异定位 + 逻辑等价比较（演练用）
+└── drill_seed.py             # 在演练沙箱内播种每类记录各一条（演练用）
 
 .github/workflows/
 ├── ci.yml                    # PR：质量门禁 + 全新库迁移 + 镜像构建 + 容器冒烟
@@ -404,6 +409,10 @@ bash ./rollback.sh                                      # 回到上一版本镜�
 # 排障：对生产库做只读冒烟
 docker compose -f compose.yaml run --rm aer-runtime python /app/scripts/smoke_test.py
 ```
+
+**灾备不是承诺，是已执行过的事实**：备份已在隔离目录被真实恢复、迁移，并由线上镜像冒烟
+通过（6/6）；恢复也可以直接从**只读挂载**的备份进行，那是灾难现场的常态。完整记录与
+复跑步骤见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) 第 15 节。
 
 三条必须知道的边界：
 

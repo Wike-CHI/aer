@@ -196,8 +196,14 @@ GHCR 推送用的是 GitHub 自带的 `GITHUB_TOKEN`，不需要额外建 PAT（
 **服务器上不保存任何长期凭据。** 私有镜像的拉取由部署工作流自己解决：它用本次运行自带的
 `GITHUB_TOKEN`（`permissions: packages: write` 隐含读权限）登录服务器，token 通过
 **stdin** 管道进入 `docker login`，既不进命令行（进程列表 / shell 历史）、也不进 CI 日志。
-该 token 在本次 job 结束后过期，服务器 `~/.docker/config.json` 里留下的是一份**已失效**
-的凭据。
+拉取完成后，工作流会**立刻把它从服务器上删掉**（`docker logout ghcr.io`，`if: always()`，
+且在确认凭据确实消失之前不会静默通过）。
+
+这条清理是 2026-09-17 的灾难恢复演练加上的：演练在一次例行检查中发现，上一次部署（数小时
+前）的 `GITHUB_TOKEN` **还留在**服务器的 `/root/.docker/config.json` 里——一个 `ghs_` 前缀的
+GitHub App 安装令牌，没人用它，也没人盯着它过期。它会自己失效，但在失效之前，它就是一台
+公网可达主机上的常驻凭据。原设计假设"过期时间够短所以不用管"，演练证明这个假设不成立：
+**只要没人删，它就一直躺在那儿。**
 
 代价与应对：
 
@@ -207,6 +213,8 @@ GHCR 推送用的是 GitHub 自带的 `GITHUB_TOKEN`，不需要额外建 PAT（
   需要手工部署时，先触发一次工作流，或在服务器上自行 `docker login ghcr.io`。
 - **`rollback.sh` 不受影响**：回滚目标镜像通常已在本机，脚本在拉取失败时会
   自动退回本地副本（这正是事故现场最需要的行为），只在本地也没有时才报错。
+- **凭据的存活窗口**：登录发生在部署步骤之前，登出发生在部署步骤之后，所以凭据只在
+  「拉取镜像」这一段时间内存在。演练已实测该登出确实生效（见第 15 节）。
 
 如果你更希望服务器长期具备拉取能力，可以改为自备一个只勾 `read:packages` 的
 classic PAT 并手工登录一次；本项目默认**不**这么做，因为那等于在服务器上常驻一个凭据。
@@ -336,9 +344,39 @@ docker compose -f compose.yaml run --rm aer-runtime \
 - 先校验备份完整性，**通过之前不碰目标**（损坏的备份必须是空操作）；
 - 目标已存在时必须 `--force`；
 - 删除目标旁边的陈旧 `-wal` / `-shm`。这一步不能省：留下属于**旧数据库**的预写日志，会在下次打开时被重放到刚恢复的文件上，产生无声的数据损坏；
-- 完成后再次校验目标完整性。
+- 完成后再次校验目标完整性，并且**恢复目录里最终只剩数据库文件本身**（校验用的只读连接
+  也会在文件旁留下 `-shm`，所以清理发生在最后一次打开之后——这条顺序由测试固定）。
 
-恢复之后：确认没有进程占用数据库，然后部署与该备份 `alembic_revision` 相符的镜像。
+### 11.1 从只读挂载恢复（灾难现场的常态）
+
+**备份目录可以直接以只读方式挂载**，这是持有备份最安全的姿态（离线介质、快照、只读副本）：
+
+```bash
+docker run --rm --entrypoint python \
+  -v /srv/aer/backups:/backups:ro \
+  -v /srv/aer/restore-target:/data \
+  "$AER_IMAGE" /app/scripts/restore_sqlite.py \
+    --source-backup /backups/<backup>.db --target /data/aer.db --force
+```
+
+实现上有一处必须知道的细节：AER 的数据库**始终带着 WAL 标记**（模式写在文件头里），而
+只读连接即使在 `mode=ro` 下也想创建 `-shm` 索引——在只读文件系统上会被内核拒绝，表现为
+`unable to open database file`。因此校验会退回到 `immutable=1`（跳过锁与 WAL 机制）。
+
+这个回退**只在没有非空 `-wal` 时才允许**。若文件旁存在非空的预写日志，脚本会**明确拒绝**
+而不是拿主文件单独下结论——对陈旧页面给出一个自信的 "ok"，比不给答案更糟。
+
+> 这条能力是 2026-09-17 演练补上的。此前 `restore_sqlite.py` 只能从可写挂载恢复，
+> 也就是说**最安全的备份持有方式恰好是它做不到的那一种**。
+
+---
+
+### 11.2 恢复相关排障
+
+| 现象 | 原因与处理 |
+| --- | --- |
+| `is not a readable SQLite database: unable to open database file` | 备份所在文件系统是只读的。当前版本会自动退回 `immutable=1`；若仍报错，请确认旁边没有**非空**的 `-wal`（有则脚本故意拒绝）。 |
+| 恢复目录里出现 `aer.db-shm` / `aer.db-wal` | 不应发生。恢复脚本必须在最后一次打开之后清除它们，否则属于旧库的预写日志会被重放到新库上。这是测试固定住的不变量，若你看到了它，说明有不属于本项目工具的东西打开过该文件。 |
 
 ---
 
@@ -410,11 +448,210 @@ all 6 checks passed
 | 镜像可回答"线上是哪个 commit" | ✅ `docker inspect` 的 `org.opencontainers.image.revision` = 该 commit |
 | 备份分支（迁移前备份） | ⚠️ 首次部署时数据库尚不存在，按设计跳过；第二次部署起生效 |
 | 回滚到上一版本 | ✅ 已实测（`rollback.sh`：dry-run + 真实回滚 + 滚回最新）。凭据已过期时自动退回本地镜像，仍在冒烟 6/6 通过 |
-| 真实故障恢复演练 | ⚠️ 未做（建议在正式使用前安排一次） |
+| 真实故障恢复演练 | ✅ 已完成（2026-09-17），见第 15 节 |
+| 从只读挂载的备份恢复 | ✅ 已实测（演练发现的缺口，已修并复测） |
 
 ---
 
-## 15. 本轮明确不做的事
+## 15. 灾难恢复演练（Disaster Recovery Drill）
+
+演练日期：**2026-09-17**（UTC 02:52 – 03:31）。目的只有一个：证明生产备份不仅
+「能生成」，而且**真的能在隔离目录恢复、迁移，并被当前线上镜像正确读取**。
+
+### 15.1 演练记录
+
+| 项 | 值 |
+| --- | --- |
+| 演练日期 | 2026-09-17 |
+| 使用的备份 | `/srv/aer/backups/aer-20260916-093453-1c18b1e88801f982f4a8be229c23357e112e8c94.db`（+ `.json` sidecar） |
+| 备份 sidecar 自述 | `aer_version=0.5.0`、`alembic_revision=0004`、`created_at=2026-09-16T09:34:53Z`、`integrity_check=ok`、`source_bytes=131072` |
+| 使用的镜像 | `ghcr.io/wike-chi/aer:sha-1c18b1e88801f982f4a8be229c23357e112e8c94` |
+| Source Revision | `0004`（备份自述，且实测一致） |
+| Restored Revision | `0004`（恢复后实测；`alembic current` 与 `alembic heads` 均为 `0004 (head)`） |
+| Integrity | 备份恢复前 = `ok`；恢复后目标 = `ok`；`PRAGMA integrity_check` 全程 `ok` |
+| Smoke Result | **6/6 passed**，且 `config.resolve` 显示 `db_path=/data/aer.db`（演练挂载，非生产路径） |
+| 是否影响 Production | **否**。数据库文件 sha256 与 mtime 演练前后完全一致，目录内始终只有 `aer.db` |
+| 实际恢复耗时 | 备份校验 + 恢复到隔离目录 + 完整性复核 = **4 秒**（同机、单文件 128 KiB） |
+| 迁移耗时 | 容器内 `alembic upgrade head`（已是 head）= **3 秒**，退出码 0，revision 前后均为 `0004 (head)` |
+
+恢复目标：`/srv/aer/drill/{data,artifacts,knowledge,logs}`（独立目录，首次演练时不存在，
+因此无需清理上一轮）。生产库 `aer.db` 全程**只读**。
+
+### 15.2 验收链路（第 18 节要求，逐段真实执行）
+
+```text
+Production Backup
+  ↓  备份存在 + sidecar 完整（不猜测缺失元数据）
+Integrity Check            → ok
+  ↓  scripts/restore_sqlite.py（禁止 cp 替代）
+Isolated Restore           → /srv/aer/drill/data/aer.db，target_integrity = ok
+  ↓
+Restored Integrity Check   → ok
+  ↓  当前线上 immutable image，容器内执行
+Container Migration        → upgrade head 退出码 0（revision 已是 head，证明幂等）
+  ↓  同一镜像，挂载 /srv/aer/drill/data
+Container Smoke            → 6/6 passed
+  ↓
+Known Records Read Back    → 逐字段一致（见 15.4）
+  ↓
+PASS
+```
+
+生产库 `config.resolve` 与演练库的隔离性是被**断言**的，不是被假设的：演练脚本先比较
+两者的 inode 与 sha256，不同才继续。
+
+### 15.3 生产未被改动（第 12 节）
+
+```text
+mtime : 2026-09-16 02:15:39.469647021 -0700   （演练前后一致）
+size  : 131072                                 （演练前后一致）
+sha256: f1d72ef63dc824c8dc5629a657648becabd152e4480f89f35d706edd39214e87  （演练前后一致）
+行数  : runs/events/errors/recoveries/verifications/experiences/experience_sources 全为 0
+目录  : /srv/aer/data 内始终只有 aer.db
+integrity_check: ok
+```
+
+**一处必须如实披露的副作用**：为搞清楚「为什么只读挂载下打不开」，演练做过一次
+*可写*挂载探针，它在生产目录里造出了 `aer.db-shm`（32768 字节）与 `aer.db-wal`
+（**0 字节**，即无任何未 checkpoint 的已提交数据）。两者已清除，数据库文件**逐字节未变**。
+
+但 `/srv/aer/data` 的**目录 mtime 因此被改动**（→ 19:45）。这正是第 12 节提醒「不要用
+mtime 作为唯一判断依据」的现实版本：数据库文件自己没动，目录的时间戳却变了。此后所有
+只读检查都改用 `mode=ro&immutable=1`，它不会创建任何副文件。
+
+### 15.4 记录保全（第 11 节）：为什么换了数据源
+
+生产库当前是**空的**——8 张表齐全、revision `0004`、`integrity_check=ok`，但
+`runs` / `events` / `errors` / `recoveries` / `verifications` / `experiences` /
+`experience_sources` **全部 0 行**。它由 `alembic upgrade head` 创建，此后只被读过。
+
+`0 == 0` 不能证明任何保全性质，所以演练在**沙箱内**用 AER 自己的公开 API 播种了一份
+含真实记录的数据（`scripts/drill_seed.py`，贯穿标记 `drill-2026-09-17`），再走
+「源 → 项目自带备份工具 → 项目自带恢复工具 → 逐字段回读」：
+
+| 记录 | ID / 关键字段 |
+| --- | --- |
+| Run | `279c0f75-e886-470f-8239-fcfd78f31d93`，`SUCCESS`，`started_at=2026-09-17T03:07:15.299239` |
+| Events | 9 条（`TASK_START`→`VERIFICATION`），`sequence` 合计 45 |
+| Error | `e2988925-2799-448f-8cf0-290636055ace`，`builtins.ConnectionRefusedError`，`resolved=1` |
+| Recovery | `8a3809d1-efb8-4d08-955e-17630247c72c`，`success=1` |
+| Verification | `36081647-96c5-45ad-b88b-66d437f65325`，`http_status`，`passed=1`，`required=1` |
+| Experience | `f0c81218-a081-47e7-a018-654d84dc4c56`，`kind=RECOVERY`，`status=VERIFIED` |
+| ExperienceSource | (`f0c81218…`, `279c0f75…`) |
+
+恢复后**逐字段读取全部一致**，且每张表的**内容摘要（SHA-256）也全部一致**
+（`logical_equal: true`）。两个文件并非逐字节相同——只差 **3 个字节**，全部落在 SQLite
+文件头的 change counter（offset 27，`2` vs `1`）。这正是不该用 checksum 当证据的原因：
+checksum 会报假警，逻辑比较不会。
+
+### 15.5 失败演练（第 14 节，仅在演练库上）
+
+两轮，都在演练沙箱内，生产库未被挂载：
+
+| 轮次 | 操作 | 结果 |
+| --- | --- | --- |
+| `sim`（有数据） | 备份后写入 marker run `72ef2287…`（runs 1→2，events 9→11）→ **删除**演练库 → 从备份重新恢复 | runs 回到 **1**、events 回到 **9**、marker **消失**、播种 ID 与经验 ID 原样保留 → 冒烟 **6/6**；恢复 3 秒 |
+| `target`（生产备份） | 备份后写入 marker run `42693e21…`（runs 0→1）→ **删除**演练库 → 从备份重新恢复 | runs 回到 **0**、marker **消失** → 冒烟 **6/6**；恢复 2 秒 |
+
+第二轮回答的是关键问题：**恢复回到的是备份的时点，而不是「文件还在」**。一个保留了备份
+之后写入的「恢复」不是恢复——只有备份之后写进去的标记能暴露这个区别。
+
+### 15.6 RPO 与 RTO（第 13 节）
+
+**RPO（恢复点目标）**：目前**没有周期性备份**，备份只在部署时产生（迁移之前）。因此
+
+> 能恢复到**最近一次成功部署之前的备份**。
+
+换句话说，最后一次部署之后写入的数据不在任何备份里。当前生产库 0 行业务数据，实际风险
+为零；一旦开始真实写入，这个窗口就变成真实的数据损失窗口。**这是本次演练最值得记住的
+一条限制**：它不是 SLA，是机制现状。
+
+**RTO（恢复时间目标）**：本次实际流程的基线——
+
+| 阶段 | 本次耗时 |
+| --- | --- |
+| 备份完整性校验 + 恢复到隔离目录 + 恢复后复核 | 4 秒 |
+| 容器内 `alembic upgrade head` | 3 秒 |
+| 失败演练中的恢复（删库后重建） | 2–3 秒 |
+
+这是**同机、同盘、单文件 128 KiB** 下的下界。真实 RTO 还要加上：发现事故、判断恢复点、
+停止写入者、选择并部署匹配 revision 的镜像、人工确认。本轮**不制定 SLA**，只记录基线。
+
+### 15.7 本轮发现并修复的缺陷
+
+| # | 缺陷 | 后果 | 处理 |
+| --- | --- | --- | --- |
+| 1 | `restore_sqlite.py` 的 `main()` 在 `restore_backup()` 返回后又校验了一次目标 | 刚清掉的 `-shm` / `-wal` 被重新造出来，恢复目录里留下属于旧库的预写日志「同族」文件 | 已修：完整性结论由 `restore_backup` 返回，调用方不再重新打开目标。新增 CLI 层回归测试（旧代码上必失败） |
+| 2 | 只读挂载下 `mode=ro` 打不开 WAL 库 | **无法从只读挂载校验或恢复备份**——最安全的备份持有方式恰好不可用 | 已修：退回 `immutable=1`，且**仅当旁边没有非空 `-wal`** 时才允许；否则明确拒绝。新增 4 项测试 |
+| 3 | 部署流程把短期 `GITHUB_TOKEN` 留在服务器上 | 公网可达主机上常驻一个没人用的凭据 | 已修：工作流新增 `docker logout ghcr.io`（`if: always()`、在拉取之后、并校验确实移除） |
+| 4 | `tests/storage/test_experience_repositories.py` 的排序断言依赖墙钟 | 测试在 2026-09-16 14:01 UTC 之后**自己开始失败**（预先存在，与本次改动无关） | 已修：改为显式时间戳，顺序确定 |
+
+缺陷 4 值得单独说明：它断言 `experience_sources.get_runs()` 的顺序，却让其中一行回退到
+`utc_now()`，另一行硬编码 `BASE_TIME + 1 分钟`。当真实时钟越过那个时刻，顺序翻转，断言必然
+失败——**生产代码是对的，测试在读时钟**。它在此前所有运行中都是绿的，然后毫无改动地变红。
+门禁抓到它是设计使然（部署流水线会重跑门禁并因此拦下发布）。
+
+### 15.8 复跑这次演练
+
+三个检查工具已随镜像发布（`scripts/drill_facts.py`、`scripts/drill_compare.py`、
+`scripts/drill_seed.py`），只读检查器**不可能写入**（只以 `mode=ro` / `immutable=1` 打开）。
+
+```bash
+# 0. 环境
+IMAGE=$(sed -n 's/^AER_IMAGE=//p' /srv/aer/deploy/current.env)
+DRILL=/srv/aer/drill
+install -d -m 0750 -o 10001 -g 10001 "$DRILL"/{data,artifacts,knowledge,backups}
+install -d -m 0755 "$DRILL"/logs
+
+# 1. 选一份备份（不要自动挑最新：选恢复点是操作员的决定）
+BK=/srv/aer/backups/<backup>.db
+cat "$BK.json"            # 先读 sidecar，不猜测缺失元数据
+
+# 2. 恢复前校验（只读挂载 + immutable，零写入）
+docker run --rm --entrypoint python \
+  -v /srv/aer/backups:/backups:ro -v "$DRILL":/tool:ro \
+  "$IMAGE" /tool/drill_facts.py facts /backups/$(basename "$BK") --immutable
+
+# 3. 恢复（只读挂载即可，见 11.1）
+docker run --rm --entrypoint python \
+  -v /srv/aer/backups:/backups:ro -v "$DRILL/data":/data \
+  "$IMAGE" /app/scripts/restore_sqlite.py \
+    --source-backup /backups/$(basename "$BK") --target /data/aer.db --force --json
+
+# 4. 迁移（即使 revision 已是 head 也执行一次，证明幂等）
+#    挂载点与镜像自带的 AER_* 变量一致，且绝不挂 /srv/aer/data
+docker run --rm \
+  -v "$DRILL/data":/data -v "$DRILL/artifacts":/artifacts \
+  -v "$DRILL/knowledge":/knowledge -v "$DRILL/backups":/backups \
+  "$IMAGE" alembic upgrade head
+
+# 5. 冒烟（必须确认 config.resolve 的 db_path 指向演练目录）
+docker run --rm \
+  -v "$DRILL/data":/data -v "$DRILL/artifacts":/artifacts \
+  -v "$DRILL/knowledge":/knowledge -v "$DRILL/backups":/backups \
+  "$IMAGE" python /app/scripts/smoke_test.py
+```
+
+编排脚本（`drill_sim.sh` / `drill_verify.sh` / `drill_fail.sh`）位于
+`/srv/aer/drill/`，属于站点专属运维脚本，未入库。
+
+### 15.9 本次演练**没有**覆盖的
+
+诚实列出边界，比让读者以为「演练过了就都安全」有用：
+
+- **生产库 0 行**，所以记录保全只能在人工播种的数据上验证（15.4）。
+- **跨 revision 恢复未演练**：本次备份的 revision 恰好等于 head（`0004`）。真实灾难中要恢复的
+  往往是一份**更旧**的备份，那条「恢复 → 前滚迁移到 head」的路径没有被验证过。
+- **同机同盘**：恢复目标与备份都在 `/srv`（同一块磁盘）。未验证跨机器、跨介质、从异地副本恢复。
+- **没有周期性备份**，见 15.6 的 RPO。
+- **未演练**：备份介质损坏/丢失、整机重建、`restore_sqlite.py` 在真实生产路径
+  （`/srv/aer/data`）上的执行。
+- `drill_seed.py` 的贯穿标记是固定字符串，重复演练需改常量。
+- 镜像里 `scripts/*.py` **没有可执行位**，必须写成 `python /app/scripts/xxx.py`。
+
+---
+
+## 16. 本轮明确不做的事
 
 不做，是因为当前只有一台服务器，也因为本轮的目的是"能可靠地构建、验证、发布、迁移、备份和回滚"，而不是堆基础设施：
 

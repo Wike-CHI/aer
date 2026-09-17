@@ -288,7 +288,15 @@ class TestExperienceSourceRepository:
         seed_run(aer, "run-2")
         aer.experiences.create(make_experience())
 
-        aer.experience_sources.add(ExperienceSource(experience_id="exp-1", run_id="run-1"))
+        # Both links carry an explicit timestamp. The assertion below is about
+        # ``created_at`` ordering, so letting one row fall back to ``utc_now()``
+        # makes the outcome depend on when the suite happens to run: this test passed
+        # for as long as the wall clock was earlier than ``BASE_TIME + 1 minute`` and
+        # then started failing on its own. A drill found it (2026-09-17); the
+        # repository was right and the test was reading the clock.
+        aer.experience_sources.add(
+            ExperienceSource(experience_id="exp-1", run_id="run-1", created_at=BASE_TIME)
+        )
         aer.experience_sources.add(
             ExperienceSource(
                 experience_id="exp-1", run_id="run-2", created_at=BASE_TIME + timedelta(minutes=1)

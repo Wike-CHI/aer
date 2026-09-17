@@ -125,14 +125,18 @@ def clear_wal_sidecars(db_path: str | Path) -> list[Path]:
     return removed
 
 
-def read_only_uri(path: str | Path) -> str:
+def read_only_uri(path: str | Path, *, immutable: bool = False) -> str:
     """A ``file:`` URI that opens ``path`` read-only.
 
     Built with :meth:`~pathlib.Path.as_uri`, which produces the correct form on
     POSIX *and* on Windows (where a bare ``C:/...`` inside a URI is parsed as a
     host). Resolved first, because ``as_uri`` refuses relative paths.
+
+    ``immutable`` additionally tells SQLite to skip locking and the write-ahead
+    log. See :func:`integrity_check` for the narrow case that is legitimate in.
     """
-    return Path(path).resolve().as_uri() + "?mode=ro"
+    query = "?mode=ro&immutable=1" if immutable else "?mode=ro"
+    return Path(path).resolve().as_uri() + query
 
 
 def integrity_check(path: str | Path) -> str:
@@ -150,16 +154,54 @@ def integrity_check(path: str | Path) -> str:
     manager manages the *transaction*, not the connection, so the file handle
     would stay open until garbage collection -- which on a busy host is "not any
     time soon".
+
+    A read-only *filesystem* is a third case, and it is the one a disaster makes
+    likely: backups held on a read-only mount, or a snapshot restored read-only.
+    ``mode=ro`` is not enough there, because a WAL-flagged database wants to create
+    ``-shm`` even for a read-only connection. :func:`_integrity_row` handles it.
     """
     target = Path(path)
     if not target.is_file():
         raise BackupError(f"Not a file: {target.as_posix()}")
     try:
-        with closing(sqlite3.connect(read_only_uri(target), uri=True)) as connection:
-            row = connection.execute("PRAGMA integrity_check").fetchone()
+        row = _integrity_row(target)
     except sqlite3.Error as exc:
         raise BackupError(f"{target.as_posix()} is not a readable SQLite database: {exc}") from exc
     return str(row[0]) if row else "unknown"
+
+
+def _integrity_row(target: Path) -> object:
+    """``PRAGMA integrity_check``'s row, tolerating a read-only filesystem.
+
+    On a read-only mount, opening a WAL-flagged database with ``mode=ro`` fails
+    with "unable to open database file": the connection still wants a ``-shm``
+    index and the kernel refuses to create it. AER's databases are always
+    WAL-flagged (the mode is persisted in the file header), so this is the normal
+    case, not an exotic one.
+
+    The fallback is ``immutable=1``, which skips locking and the WAL machinery
+    entirely. That is only sound when there is no write-ahead log to skip, so it is
+    taken **only** when no non-empty ``-wal`` sits beside the file. If there is one,
+    the check refuses instead of quietly judging the main file alone -- a
+    confident "ok" about stale pages would be worse than no answer at all.
+    """
+    try:
+        with closing(sqlite3.connect(read_only_uri(target), uri=True)) as connection:
+            return connection.execute("PRAGMA integrity_check").fetchone()
+    except sqlite3.OperationalError as exc:
+        if "unable to open database file" not in str(exc):
+            raise
+        write_ahead = Path(f"{target}-wal")
+        if write_ahead.is_file() and write_ahead.stat().st_size > 0:
+            raise sqlite3.OperationalError(
+                f"{target.as_posix()} sits on a read-only filesystem together with a "
+                f"non-empty {write_ahead.name}; refusing to verify the main file alone, "
+                "because committed pages may still be in that write-ahead log"
+            ) from exc
+        with closing(
+            sqlite3.connect(read_only_uri(target, immutable=True), uri=True)
+        ) as connection:
+            return connection.execute("PRAGMA integrity_check").fetchone()
 
 
 def require_intact(path: str | Path, *, label: str) -> str:

@@ -170,24 +170,48 @@ def integrity_check(path: str | Path) -> str:
     return str(row[0]) if row else "unknown"
 
 
-def _integrity_row(target: Path) -> object:
-    """``PRAGMA integrity_check``'s row, tolerating a read-only filesystem.
+def _connect_and_probe(uri: str, timeout: float) -> sqlite3.Connection:
+    """Open ``uri`` and force one read, so a lazy open failure surfaces here.
 
-    On a read-only mount, opening a WAL-flagged database with ``mode=ro`` fails
-    with "unable to open database file": the connection still wants a ``-shm``
-    index and the kernel refuses to create it. AER's databases are always
-    WAL-flagged (the mode is persisted in the file header), so this is the normal
-    case, not an exotic one.
+    ``sqlite3.connect`` does not touch the file, and SQLite reports
+    "unable to open database file" for a read-only *filesystem* only when something
+    actually reads. Probing makes that failure happen at a point the caller can
+    react to, instead of in the middle of a copy.
+    """
+    connection = sqlite3.connect(uri, uri=True, timeout=timeout)
+    try:
+        connection.execute("PRAGMA schema_version").fetchone()
+    except sqlite3.Error:
+        connection.close()
+        raise
+    return connection
+
+
+def open_read_only(path: str | Path, *, timeout: float = 30.0) -> sqlite3.Connection:
+    """The one way to open a database for reading.
+
+    Used by every read path -- integrity checks, sidecar metadata, and the *source*
+    of a restore -- so the read-only-filesystem fallback cannot be present in one
+    place and missing in another. It was missing in the restore's copy step, and a
+    post-deploy check caught it: verification of a backup on a read-only mount
+    succeeded while the restore that used it still failed.
+
+    On a read-only mount, opening a WAL-flagged database with ``mode=ro`` fails:
+    the connection still wants a ``-shm`` index and the kernel refuses to create it.
+    AER's databases are always WAL-flagged (the mode is persisted in the file
+    header), so this is the normal case, not an exotic one.
 
     The fallback is ``immutable=1``, which skips locking and the WAL machinery
     entirely. That is only sound when there is no write-ahead log to skip, so it is
     taken **only** when no non-empty ``-wal`` sits beside the file. If there is one,
-    the check refuses instead of quietly judging the main file alone -- a
-    confident "ok" about stale pages would be worse than no answer at all.
+    the open refuses instead of quietly reading the main file alone -- a confident
+    answer about stale pages would be worse than no answer at all.
+
+    The caller owns the returned connection and must close it.
     """
+    target = Path(path)
     try:
-        with closing(sqlite3.connect(read_only_uri(target), uri=True)) as connection:
-            return connection.execute("PRAGMA integrity_check").fetchone()
+        return _connect_and_probe(read_only_uri(target), timeout)
     except sqlite3.OperationalError as exc:
         if "unable to open database file" not in str(exc):
             raise
@@ -195,13 +219,16 @@ def _integrity_row(target: Path) -> object:
         if write_ahead.is_file() and write_ahead.stat().st_size > 0:
             raise sqlite3.OperationalError(
                 f"{target.as_posix()} sits on a read-only filesystem together with a "
-                f"non-empty {write_ahead.name}; refusing to verify the main file alone, "
+                f"non-empty {write_ahead.name}; refusing to read the main file alone, "
                 "because committed pages may still be in that write-ahead log"
             ) from exc
-        with closing(
-            sqlite3.connect(read_only_uri(target, immutable=True), uri=True)
-        ) as connection:
-            return connection.execute("PRAGMA integrity_check").fetchone()
+    return _connect_and_probe(read_only_uri(target, immutable=True), timeout)
+
+
+def _integrity_row(target: Path) -> object:
+    """``PRAGMA integrity_check``'s row, via :func:`open_read_only`."""
+    with closing(open_read_only(target)) as connection:
+        return connection.execute("PRAGMA integrity_check").fetchone()
 
 
 def require_intact(path: str | Path, *, label: str) -> str:

@@ -59,6 +59,48 @@ class _RefusingConnect:
         return sqlite3.connect(database, *args, **kwargs)  # type: ignore[arg-type]
 
 
+class _RecordingConnect:
+    """Delegates to the real ``sqlite3.connect`` and remembers every request."""
+
+    def __init__(self) -> None:
+        self.attempts: list[str] = []
+
+    def __call__(self, database: str, *args: object, **kwargs: object) -> sqlite3.Connection:
+        self.attempts.append(str(database))
+        return sqlite3.connect(database, *args, **kwargs)  # type: ignore[arg-type]
+
+
+class _FailingSourceConnection:
+    """A source whose ``backup`` fails, as a disk dying mid-copy would.
+
+    ``sqlite3.Connection`` is an immutable C type, so its ``backup`` method cannot be
+    patched; the seam is the helper that creates the connection. That seam is worth
+    having anyway -- it is the same one the read-only-mount fallback lives behind.
+    """
+
+    def __init__(self, real: sqlite3.Connection) -> None:
+        self._real = real
+
+    def backup(self, target: object) -> None:
+        del target
+        raise sqlite3.OperationalError("disk I/O error")
+
+    def close(self) -> None:
+        self._real.close()
+
+
+@pytest.fixture
+def failing_source(
+    monkeypatch: pytest.MonkeyPatch, backup_sqlite: ModuleType, restore_sqlite: ModuleType
+) -> None:
+    """Make the restore's source connection fail when asked to copy."""
+
+    def factory(path: object, **kwargs: object) -> _FailingSourceConnection:
+        return _FailingSourceConnection(backup_sqlite.open_read_only(path, **kwargs))  # type: ignore[arg-type]
+
+    monkeypatch.setattr(restore_sqlite, "open_read_only", factory)
+
+
 @pytest.fixture
 def faked_read_only_mount(
     monkeypatch: pytest.MonkeyPatch, backup_sqlite: ModuleType
@@ -119,6 +161,82 @@ class TestRestoreLeavesNoSidecars:
 
         assert destination == target
         assert verdict == "ok"
+
+
+class TestTheCopyAlsoSurvivesAReadOnlyMount:
+    """The fallback has to be in every read path, not only in the check.
+
+    Post-deploy verification on the real server caught this: with the first fix
+    applied, verifying a backup on a read-only mount succeeded while the restore
+    that used it still failed -- because only the integrity check had been fixed.
+    A fix that covers one of two call sites is not a fix.
+    """
+
+    def test_the_source_is_opened_read_only(
+        self,
+        data_dir: Path,
+        tmp_path: Path,
+        backup_sqlite: ModuleType,
+        restore_sqlite: ModuleType,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seed_runs(data_dir, ("one",))
+        backup = make_backup(backup_sqlite, data_dir, tmp_path / "backups" / "source.db")
+        target = tmp_path / "restored" / "aer.db"
+
+        recorder = _RecordingConnect()
+        namespace = types.SimpleNamespace(
+            connect=recorder,
+            Error=sqlite3.Error,
+            OperationalError=sqlite3.OperationalError,
+        )
+        monkeypatch.setattr(backup_sqlite, "sqlite3", namespace)
+        monkeypatch.setattr(restore_sqlite, "sqlite3", namespace)
+
+        restore_sqlite.restore_backup(backup, target)
+
+        source_opens = [uri for uri in recorder.attempts if "source.db" in uri]
+        assert source_opens, recorder.attempts
+        assert all("mode=ro" in uri for uri in source_opens), source_opens
+
+    def test_a_failed_copy_leaves_no_empty_database_behind(
+        self,
+        data_dir: Path,
+        tmp_path: Path,
+        backup_sqlite: ModuleType,
+        restore_sqlite: ModuleType,
+        failing_source: None,
+    ) -> None:
+        """A zero-length `aer.db` looks like a database. Do not leave one behind."""
+        seed_runs(data_dir, ("one",))
+        backup = make_backup(backup_sqlite, data_dir, tmp_path / "backups" / "one.db")
+        target = tmp_path / "restored" / "aer.db"
+
+        with pytest.raises(restore_sqlite.RestoreError):
+            restore_sqlite.restore_backup(backup, target)
+
+        assert not target.exists()
+        assert not target.parent.exists() or list(target.parent.iterdir()) == []
+
+    def test_a_failed_copy_does_not_destroy_a_target_that_already_existed(
+        self,
+        data_dir: Path,
+        tmp_path: Path,
+        backup_sqlite: ModuleType,
+        restore_sqlite: ModuleType,
+        failing_source: None,
+    ) -> None:
+        """Removing "what we created" must never become removing what was there."""
+        seed_runs(data_dir, ("one",))
+        backup = make_backup(backup_sqlite, data_dir, tmp_path / "backups" / "one.db")
+        target = Path(data_dir) / "aer.db"
+        before = target.read_bytes()
+
+        with pytest.raises(restore_sqlite.RestoreError):
+            restore_sqlite.restore_backup(backup, target, force=True)
+
+        assert target.exists()
+        assert target.read_bytes() == before
 
 
 class TestReadOnlyFilesystem:

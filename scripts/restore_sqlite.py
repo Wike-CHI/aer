@@ -48,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backup_sqlite import (
     BackupError,
     clear_wal_sidecars,
+    open_read_only,
     require_intact,
     wal_sidecars,
 )
@@ -121,6 +122,10 @@ def restore_backup(
     _require_intact(backup, label="backup")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
+    # Remembered so a failed copy can undo the one thing it may have created. A
+    # zero-length `aer.db` left where the target should be looks like a database and
+    # is the worst possible outcome to debug at 3am.
+    target_was_absent = not destination.exists()
     # Must happen *before* opening the target, or the old WAL is replayed over the
     # restored pages (see the module docstring).
     clear_write_ahead_logs(destination)
@@ -131,11 +136,19 @@ def restore_backup(
     # exactly the cleanup that has to happen before this function returns.
     try:
         with (
-            closing(sqlite3.connect(backup, timeout=30.0)) as source_connection,
+            # Read-only, through the same helper every other read path uses: the
+            # source of a restore may live on a read-only filesystem, and a plain
+            # `sqlite3.connect` there opens it read-write and fails.
+            closing(open_read_only(backup)) as source_connection,
             closing(sqlite3.connect(destination, timeout=30.0)) as target_connection,
         ):
             source_connection.backup(target_connection)
     except sqlite3.Error as exc:
+        if target_was_absent:
+            # Leave the filesystem as we found it. `missing_ok` because the failure
+            # may have happened before the file was created at all.
+            Path(destination).unlink(missing_ok=True)
+            clear_write_ahead_logs(destination)
         raise RestoreError(f"Restoring {backup.as_posix()} failed: {exc}") from exc
 
     # Both handles are closed by now: SQLite checkpoints and drops the WAL on its

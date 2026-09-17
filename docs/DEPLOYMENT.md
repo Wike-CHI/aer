@@ -712,14 +712,14 @@ docker run --rm \
 | 演练日期 | 2026-09-17 |
 | Source Revision | `0003`（从**空库**用该旧版 Migration 构建，**没有**对任何现有库 `downgrade`） |
 | Target Revision | `0004`（由 `alembic heads` 确定，代码里未硬编码） |
-| Image | `ghcr.io/wike-chi/aer:sha-af13c73e5144fe8640ffaf6c79b3fc80b0072e9e`（当前线上镜像） |
+| Image | `ghcr.io/wike-chi/aer:sha-843e4a92bde8c8f28e18761d301721745fe5ec3a`（演练时的当前线上镜像） |
 | 历史记录保全 | ✅ 2 runs / 11 events / 1 error / 1 recovery / 1 verification，**逐表行数、共有表 DDL、每表内容摘要、抽样行字段**全部一致 |
 | 新 Schema 状态 | ✅ `experiences` 与 `experience_sources` 存在且**各 0 行**（迁移只建 schema，不造业务数据） |
 | Runtime 读 | ✅ 打开成功（revision 0004），`verified_success=true`、error `resolved`、recovery `success`、verdict `passed` 全部读回 |
 | Runtime 写 | ✅ 新建 run + 验证通过；经验管线产出 `SUCCESS/VERIFIED` 经验（1 条 source）；计数 3 runs / 1 experience |
 | Smoke | ✅ 迁移**前** exit 1 且**未修改**该库；迁移**后** 6/6 通过，exit 0 |
 | Production 影响 | ✅ 数据库 sha256 `f1d72ef6…` 与 mtime `1789550139` 演练前后一致 |
-| 实际耗时 | **64 秒**（19 个步骤，含 11 次容器启动） |
+| 实际耗时 | **65 秒**（19 个步骤，含 11 次容器启动） |
 
 ### 16.2 演练链路（第 30 节验收，逐段真实执行）
 
@@ -801,7 +801,7 @@ Restart（新进程）          → 3 runs（2 历史 + 1 新）、revision 0004
 - **RPO 不变**：备份仍然只在部署时产生（迁移之前）。现在多了一条底气——**迁移前那份备份
   是可用恢复点**，即使它比当前 head 旧。这正是 `deploy.sh` 备份早于迁移的意义。
 - **RTO 的跨版本部分**：从「恢复旧备份」到「库在 head 且冒烟通过」= 恢复 + `upgrade head` +
-  冒烟。本轮实测 64 秒完成 19 个步骤（含 11 次容器启动），其中迁移本身是秒级。
+  冒烟。本轮实测 65 秒完成 19 个步骤（含 11 次容器启动），其中迁移本身是秒级。
 - **一条新的运维事实**：旧备份的 sidecar 里写着它自己的 `alembic_revision`。恢复一份旧备份后，
   你能从 sidecar 知道它是哪个版本，而不必去猜。
 

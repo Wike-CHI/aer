@@ -191,6 +191,9 @@ def run_checks(
     temp_db_check: bool,
 ) -> list[CheckResult]:
     """Every check, in the order that makes each one's guard valid."""
+    # Revision *before* opening: AER migrates on construction, so a stale revision
+    # must be reported, not silently fixed by the smoke test.
+    revision = check_schema_revision(config.db_path, expected=expected_revision)
     results = [
         CheckResult("runtime.version", True, f"aer {__version__}, python {sys.version.split()[0]}"),
         CheckResult(
@@ -207,14 +210,40 @@ def run_checks(
             }
         ),
         check_database_integrity(config.db_path),
-        # Revision *before* opening: AER migrates on construction, so a stale
-        # revision must be reported, not silently fixed by the smoke test.
-        check_schema_revision(config.db_path, expected=expected_revision),
-        check_runtime_opens(config),
+        revision,
+        _check_runtime_open(config, revision),
     ]
     if temp_db_check:
         results.append(check_temporary_roundtrip())
     return results
+
+
+#: Shown when the runtime open is not attempted. Removing the last chance to see a
+#: database's revision before it changes is the failure this check now avoids.
+REVISION_PRECEDENCE_DETAIL = (
+    "not attempted: the database is not at the revision this image ships, and "
+    "AER(...) applies pending migrations on construction -- opening it would rewrite "
+    "the schema of the very database this check promises not to modify"
+)
+
+
+def _check_runtime_open(config: DeploymentConfig, revision: CheckResult) -> CheckResult:
+    """Open the store through the public API, but only when that cannot migrate it.
+
+    ``AER(...)`` calls ``upgrade_to_head`` in its constructor, so "open the store"
+    and "read the store" are the same thing only while the database is already at
+    head. On anything older -- which is exactly what a restored older backup is --
+    the open *is* a migration.
+
+    A cross-revision recovery drill caught the consequence: the smoke test reported
+    ``database.revision`` as failed and then upgraded the database from 0003 to 0004
+    anyway, so the operator could no longer see what they had restored. The check is
+    skipped, and reported as **unmet rather than passed** -- nothing was proven
+    about this database.
+    """
+    if not revision.ok:
+        return CheckResult("runtime.open", False, REVISION_PRECEDENCE_DETAIL)
+    return check_runtime_opens(config)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

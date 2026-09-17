@@ -8,6 +8,7 @@ is the part that is easy to get wrong and invisible when it is.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from types import ModuleType
 
@@ -168,3 +169,96 @@ class TestSchemaCheck:
 
         assert result.ok is False
         assert "0002" in result.detail
+
+
+class TestTheSmokeTestNeverMigrates:
+    """A check that promises not to modify what it judges must not migrate it.
+
+    Found by the cross-revision recovery drill of 2026-09-17. `AER(...)` calls
+    `upgrade_to_head` in its constructor, so opening a store is only a *read* while
+    the database is already at head. On anything older -- exactly what a restored
+    older backup is -- the open is a migration.
+
+    The smoke test reported `database.revision` as failed and then upgraded the
+    database from 0003 to 0004 anyway, which also destroyed the operator's only
+    chance to see what revision they had actually restored.
+    """
+
+    @staticmethod
+    def build_stale_store(data_dir: Path, revision: str) -> Path:
+        """A store at ``revision``, built by Alembic, holding one real run.
+
+        The row goes in as SQL on purpose: every higher-level helper in this suite
+        goes through ``AER(...)``, and ``AER(...)`` migrates. Using one here would
+        upgrade the database inside the fixture and leave the test asserting nothing.
+        """
+        from alembic import command
+
+        from aer.storage.migrations import alembic_config
+
+        data_dir.mkdir(parents=True, exist_ok=True)
+        database = data_dir / "aer.db"
+        command.upgrade(alembic_config(database), revision)
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "INSERT INTO runs (id, task_description, status, started_at) "
+                "VALUES ('run-stale', 'pre-migration run', 'SUCCESS', "
+                "'2026-09-16 09:00:00.000000')"
+            )
+            connection.commit()
+        return database
+
+    def test_a_stale_database_is_left_at_its_revision(
+        self, smoke_test: ModuleType, ops_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        database = self.build_stale_store(ops_root / "data", "0003")
+        monkeypatch.setenv("AER_ENV", "production")
+        monkeypatch.setenv("AER_DATA_DIR", str(ops_root / "data"))
+        monkeypatch.setenv("AER_ARTIFACT_DIR", str(ops_root / "artifacts"))
+        monkeypatch.setenv("AER_KNOWLEDGE_DIR", str(ops_root / "knowledge"))
+        monkeypatch.setenv("AER_BACKUP_DIR", str(ops_root / "backups"))
+        monkeypatch.delenv("AER_DB_PATH", raising=False)
+        assert current_revision(database) == "0003"
+
+        assert run(smoke_test) == 1
+
+        assert current_revision(database) == "0003", "the smoke test migrated the database"
+        assert row_count(database, "runs") == 1
+        with sqlite3.connect(database) as connection:
+            tables = {
+                row[0]
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+        assert "experiences" not in tables, "a new table appeared without a migration step"
+
+    def test_the_unattempted_open_is_reported_rather_than_passed(
+        self, smoke_test: ModuleType, ops_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing was proven about the database, so the check must not read `ok`."""
+        database = self.build_stale_store(ops_root / "data", "0003")
+
+        revision = smoke_test.check_schema_revision(database, expected=head_revision())
+        result = smoke_test._check_runtime_open(
+            smoke_test.load_deployment_config({"AER_DATA_DIR": str(ops_root / "data")}),
+            revision,
+        )
+
+        assert revision.ok is False
+        assert result.ok is False
+        assert result.name == "runtime.open"
+        assert "not attempted" in result.detail
+        assert current_revision(database) == "0003"
+
+    def test_a_healthy_store_still_gets_opened(
+        self, smoke_test: ModuleType, production: Path
+    ) -> None:
+        """The skip must apply only to the case that would migrate."""
+        database = production / "data" / "aer.db"
+        revision = smoke_test.check_schema_revision(database, expected=head_revision())
+        # Resolved from the environment the fixture set, so the production path
+        # rules (all paths absolute) are exercised rather than sidestepped.
+        result = smoke_test._check_runtime_open(smoke_test.load_deployment_config(), revision)
+
+        assert revision.ok is True
+        assert result.ok is True
+        assert "runs=" in result.detail

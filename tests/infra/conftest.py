@@ -84,6 +84,12 @@ def drill_seed() -> ModuleType:
     return load_script("drill_seed")
 
 
+@pytest.fixture(scope="session")
+def drill_seed_revision() -> ModuleType:
+    """The ``drill_seed_revision`` module: a fixture for a *specific* revision."""
+    return load_script("drill_seed_revision")
+
+
 @pytest.fixture
 def ops_root(tmp_path: Path) -> Path:
     """An isolated stand-in for ``/srv/aer``: data, artifacts, knowledge, backups."""

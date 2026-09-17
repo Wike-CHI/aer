@@ -16,6 +16,11 @@ Usage: python drill_compare.py <file-a> <file-b> [--a-immutable] [--b-immutable]
 ``--a-immutable`` / ``--b-immutable`` are needed when one side is a WAL-mode
 database mounted read-only: a plain ``mode=ro`` connection would then want to
 create ``-shm`` and fail.
+
+``--shared-tables`` compares only the tables both files have, ignoring
+``alembic_version``: the question a cross-revision drill asks is whether the
+migration preserved what already existed, and the migration is *supposed* to add
+tables and bump the revision.
 """
 
 from __future__ import annotations
@@ -32,7 +37,14 @@ def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def compare(a: str, b: str, a_immutable: bool, b_immutable: bool) -> dict[str, object]:
+def compare(
+    a: str,
+    b: str,
+    a_immutable: bool,
+    b_immutable: bool,
+    *,
+    shared_tables_only: bool = False,
+) -> dict[str, object]:
     first, second = Path(a), Path(b)
     raw_a, raw_b = first.read_bytes(), second.read_bytes()
     report: dict[str, object] = {
@@ -56,8 +68,25 @@ def compare(a: str, b: str, a_immutable: bool, b_immutable: bool) -> dict[str, o
     report["header_first_100_bytes_identical"] = raw_a[:100] == raw_b[:100]
 
     # Logical equality: schema inventory and content hash of every table.
-    report["logical"] = {"a": _logical(a, a_immutable), "b": _logical(b, b_immutable)}
-    report["logical_equal"] = report["logical"]["a"] == report["logical"]["b"]
+    logical_a, logical_b = _logical(a, a_immutable), _logical(b, b_immutable)
+    contents_a: dict[str, object] = dict(logical_a["contents"])  # type: ignore[arg-type]
+    contents_b: dict[str, object] = dict(logical_b["contents"])  # type: ignore[arg-type]
+    report["tables_only_in_a"] = sorted(set(contents_a) - set(contents_b))
+    report["tables_only_in_b"] = sorted(set(contents_b) - set(contents_a))
+
+    report["shared_tables_only"] = shared_tables_only
+    if shared_tables_only:
+        # `alembic_version` is excluded deliberately: its whole job is to change
+        # when a migration runs, so including it would make this comparison always
+        # report a difference and say nothing about the data.
+        shared = (set(contents_a) & set(contents_b)) - {"alembic_version"}
+        contents_a = {table: contents_a[table] for table in sorted(shared)}
+        contents_b = {table: contents_b[table] for table in sorted(shared)}
+        logical_a = {"contents": contents_a}
+        logical_b = {"contents": contents_b}
+
+    report["logical"] = {"a": logical_a, "b": logical_b}
+    report["logical_equal"] = contents_a == contents_b
     return report
 
 
@@ -95,7 +124,13 @@ def main(argv: list[str]) -> int:
         return 2
     print(
         json.dumps(
-            compare(paths[0], paths[1], "--a-immutable" in flags, "--b-immutable" in flags),
+            compare(
+                paths[0],
+                paths[1],
+                "--a-immutable" in flags,
+                "--b-immutable" in flags,
+                shared_tables_only="--shared-tables" in flags,
+            ),
             indent=2,
             sort_keys=True,
         )

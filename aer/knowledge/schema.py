@@ -140,11 +140,14 @@ def fts_index_statement(environ: Mapping[str, str] | None = None) -> str:
     if dictionary:
         options.append(f"jieba_dict = {_quote(dictionary)}")
     columns = ", ".join(EXPERIENCE_INDEXED_PROPERTIES)
-    # `IF NOT EXISTS` because `ensure_schema` runs on every open: without it the
-    # second open would either raise or need a probe query, and the probe the first
-    # version used wrote a real engine error into the log of a healthy system.
+    # Deliberately **without** `IF NOT EXISTS`, even though the engine's own FTS
+    # documentation shows the clause in its syntax block: the grammar rejects it
+    # outright -- `Parser exception: Invalid input <NOT>` -- which only running it
+    # revealed. Repeatability is `ensure_schema`'s job, and it does that by asking
+    # the catalogue whether the index is already there rather than by hoping the
+    # engine will ignore a second attempt.
     return (
-        f"CREATE INDEX IF NOT EXISTS {FTS_INDEX_NAME} ON Experience USING FTS ({columns}) "
+        f"CREATE INDEX {FTS_INDEX_NAME} ON Experience USING FTS ({columns}) "
         f"WITH ({', '.join(options)})"
     )
 

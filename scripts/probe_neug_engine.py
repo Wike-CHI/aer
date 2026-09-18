@@ -163,8 +163,22 @@ def _run(neug, database_path: str, results: Results, *, raw_url: str) -> None:  
     results.check("the database path becomes a directory", Path(database_path).is_dir())
 
     print("\n## schema")
+    # `ensure_schema` decides whether to create the schema by asking the catalogue,
+    # so this procedure has to work and has to be usable on an empty database.
+    before_ddl = [str(row[0]) for row in connection.execute("CALL SHOW_NODE_TABLES() RETURN *")]
+    results.check(
+        "SHOW_NODE_TABLES() answers on a database with no schema",
+        "Experience" not in before_ddl,
+        str(sorted(before_ddl)),
+    )
     for statement in DDL:
         connection.execute(statement)
+    after_ddl = [str(row[0]) for row in connection.execute("CALL SHOW_NODE_TABLES() RETURN *")]
+    results.check(
+        "SHOW_NODE_TABLES() reports the labels the DDL created",
+        {"Experience", "RunRef", "Domain"} <= set(after_ddl),
+        str(sorted(after_ddl)),
+    )
     for statement in DDL:
         connection.execute(statement)
     results.check("schema DDL is repeatable", True)
@@ -289,15 +303,17 @@ def _run(neug, database_path: str, results: Results, *, raw_url: str) -> None:  
         " WITH (tokenizer = 'jieba', jieba_mode = 'mix')"
     )
     results.check("CREATE INDEX ... USING FTS with the jieba tokenizer", True)
-    # `ensure_schema` runs on every open, so the statement must be repeatable.
-    # Relying on an explicit "does it exist" probe instead cost a real engine error
-    # in the log of every healthy start.
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS experience_fts ON Experience USING FTS (title, problem,"
-        " root_cause, solution, failed_attempts_text, avoid_text)"
-        " WITH (tokenizer = 'jieba', jieba_mode = 'mix')"
+    # The FTS documentation shows `[IF NOT EXISTS]` in its CREATE INDEX syntax and
+    # the grammar does not implement it. `ensure_schema` therefore establishes
+    # existence by asking the catalogue, not by re-running a statement that would
+    # be rejected as a syntax error the second time.
+    results.raises(
+        "CREATE INDEX IF NOT EXISTS is rejected by the parser (the docs list it)",
+        lambda: connection.execute(
+            "CREATE INDEX IF NOT EXISTS experience_fts ON Experience USING FTS (title)"
+            " WITH (tokenizer = 'jieba')"
+        ),
     )
-    results.check("CREATE INDEX IF NOT EXISTS is repeatable", True)
 
     def score(query: str) -> list:
         statement = (

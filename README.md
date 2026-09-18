@@ -388,6 +388,59 @@ docker compose -f deploy/compose.yaml config    # 需要 deploy/.env
 
 ---
 
+## 检索：SQLite 是事实源，NeuG 只是它的投影
+
+M6 引入了一个可检索的知识索引，用的是嵌入式图数据库 NeuG。**一句话的规则**：
+
+```text
+SQLite  = 唯一事实源（runs / events / errors / recoveries / verifications
+          / experiences / experience_sources）
+NeuG    = 从 SQLite 推导出来的可重建投影，只用来检索
+```
+
+没有任何一行代码把图库里的东西写回 experience store。整个
+`/srv/aer/knowledge` 删掉，代价只是重建一次（一千条约两秒），不是丢数据。
+
+```python
+with AER("./data", knowledge_dir="./knowledge") as aer:
+    aer.project_experiences()                     # SQLite → NeuG
+
+    result = aer.retrieve("WordPress REST API 403", domain="wordpress")
+    print([hit.label for hit in result.guidance])   # ['Verified Recovery']
+    print([hit.label for hit in result.warnings])   # ['Known Failure']
+
+    print(aer.experience_context("WordPress REST API 403"))   # 直接可注入的文本
+```
+
+### 三个角色，永远不混
+
+| 标签 | 含义 | 出现在 |
+| --- | --- | --- |
+| `[Verified Success]` | 独立验证通过、一步到位 | `guidance` |
+| `[Verified Recovery]` | 失败后修好、且结果被验证 | `guidance` |
+| `[Known Failure]` | 确认不管用的做法 | `warnings` |
+| `[Unverified Recovery Observation]` | 只有 Agent 自述，没有外部确认 | `warnings`（仅 DIAGNOSTIC） |
+
+`kind=FAILURE` 的记录**只进 `warnings`**，而且格式上不可能输出 `Solution:` ——
+唯一比不检索更糟的结果，是让 Agent 把"试过、没用"当成方案去执行。
+
+### 运维
+
+```bash
+python -m aer.knowledge status     # 可达性 / 投影版本 / 两个计数 / drift
+python -m aer.knowledge project    # 增量补齐（把还没投影的经验补上）
+python -m aer.knowledge rebuild    # 从 SQLite 重建并原子替换（万能的修法）
+```
+
+知识库丢了、坏了、版本不符——三种情况的修法都是 `rebuild`，
+因为它的每一个字节都能从 SQLite 推导出来。
+
+### 这一版不做什么
+
+不做 embedding、不做 HNSW 向量检索、不记录 `reuse_count`、不做 Workflow / Dataset。
+原因见 `docs/DECISIONS.md` D-056 与 D-060：**目前没有真实检索数据证明 BM25 不够用**，
+也没有数据能定义"这次检索有用"。
+
 ## 部署
 
 完整步骤见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。要点：

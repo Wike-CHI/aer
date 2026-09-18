@@ -1707,7 +1707,26 @@ success_count += 1
 
 ---
 
-# 26. Next Stage Gate
+# 26. Milestone 6 — NeuG Knowledge Index & Retrieval（已完成）
+
+完成日期：2026-09-18。验收详见 `docs/DEPLOYMENT.md` 第 17 节与
+`docs/DECISIONS.md` D-053..D-063。
+
+```text
+[✓] SQLite 仍是唯一事实源，NeuG 是可重建投影（D-053）
+[✓] 引擎行为以目标环境实测为准，不以文档为准（D-054，7 条与文档不符）
+[✓] neug 精确锁定 0.2.0（D-055）
+[✓] 只做 BM25 + 图过滤，不做 HNSW（D-056）
+[✓] 跨库不做分布式事务：投影最终可修复（D-057）
+[✓] 知识库可无限重建，rebuild 是唯一修复手段（D-058）
+[✓] FAILURE 只进 warnings（D-059）
+[✓] 检索只读，不记 usage（D-060）
+[✓] 嵌入式优先于 Service Mode（D-061）
+[✓] 用户查询必须转成安全的全文表达式（D-062）
+[✓] 投影按批提交（D-063）
+```
+
+# 27. Next Stage Gate
 
 只有 P0 MVP Accepted 后，才能进入：
 

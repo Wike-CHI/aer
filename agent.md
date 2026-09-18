@@ -968,20 +968,32 @@ Retrieval：
 
 > 在新任务执行前寻找相关历史经验。
 
-MVP 第一阶段：
+M6 起实现为：
 
 ```text
-SQLite FTS5
+SQLite（事实源）
+   ↓ 单向投影
+NeuG 图索引（可重建）
+   ↓
+BM25 + 图过滤（APPLIES_TO / DERIVED_FROM）
+   ↓
+策略（GUIDANCE / DIAGNOSTIC / ALL）→ 排序 → 角色化文本
 ```
 
-FTS：
+三条必须遵守的规则：
 
 ```text
-Full-Text Search
-全文搜索
+SQLite 是唯一事实源；NeuG 只是投影，任何时刻都可以重建。
+experience 与 runtime 层不得 import neug；所有引擎操作集中在
+aer/knowledge/neug.py。
+检索是只读的：不写 usage、不改 statistics（那是 M7）。
 ```
 
-即可。
+**角色不能混**：`SUCCESS` / `RECOVERY`（且已验证）进 `guidance`，
+`FAILURE` 与未验证观察进 `warnings`。`FAILURE` 永远不作为方案输出。
+
+**不可达 ≠ 空**：知识索引打不开时抛 `KnowledgeIndexUnavailable`，
+绝不返回空结果——"没有经验"和"知识库坏了"是两件事。
 
 ---
 
@@ -992,6 +1004,12 @@ Full-Text Search
 ```text
 Embedding
 ```
+
+::: warning 不要提前做
+M6 明确只做 BM25 + 图过滤（`docs/DECISIONS.md` D-056）：在真实检索数据证明
+BM25 存在明显语义召回问题之前引入向量，只会让"检索不好用"变成
+"不知道是分词、BM25、embedding 还是融合的问题"。
+:::
 
 Embedding：
 

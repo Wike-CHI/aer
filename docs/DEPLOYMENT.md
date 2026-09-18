@@ -862,6 +862,164 @@ docker run --rm --entrypoint python -v <restored-data>:/data \
 
 ---
 
+## 18. 知识索引（NeuG）运维
+
+M6 引入了一个可检索的图索引。**它不参与灾备**，这一点决定了下面每一条操作，
+所以先说清楚：
+
+```text
+SQLite  = 唯一事实源
+NeuG    = 从 SQLite 推导出来的投影，任何时刻都能重建
+
+因此：知识库丢失 **不需要** 恢复 SQLite 备份，只需要一次 rebuild。
+```
+
+### 18.1 数据位置
+
+```text
+宿主机：/srv/aer/knowledge/aer-knowledge/      ← NeuG 数据库（一个目录）
+        /srv/aer/knowledge/aer-knowledge.projection.json   ← 投影元数据（同级文件）
+容器内：/knowledge/aer-knowledge
+```
+
+数据库路径来自 `AER_KNOWLEDGE_DIR`，**Python 代码里不出现 `/srv/aer`**（D-046）。
+
+元数据文件记录 `projection_schema_version`。它是同级文件而不是库内节点，因为
+NeuG 自己决定它拿到的路径是文件还是目录，而代码不应该依赖这一点。
+
+目录里有什么：
+
+```text
+checkpoint/   runtime/   wal/   neugdb.lock
+```
+
+`neugdb.lock` 意味着**读写模式打开时独占**：`status` 与另一个正在写入的进程
+不能同时打开同一个库。当前是"一次性容器"模型，所以不构成问题；
+这也是将来考虑 Service Mode 的触发条件（D-061）。
+
+### 18.2 状态
+
+```bash
+docker compose --file /srv/aer/deploy/compose.yaml run --rm   aer-runtime python -m aer.knowledge status
+```
+
+输出：
+
+```text
+knowledge database : /knowledge/aer-knowledge
+reachable          : yes
+projection schema  : 1
+store experiences  : 0
+index experiences  : 0
+drift              : none
+```
+
+`drift` 是 SQLite 与索引在 `(id, updated_at)` 上的差集，分三类：
+
+| 类别 | 含义 | 说明 |
+| --- | --- | --- |
+| `missing` | SQLite 有、索引没有 | 投影从未跑过，或跑失败过 |
+| `stale` | 两边都有但 `updated_at` 不同 | 写入之后没有再投影 |
+| `orphaned` | 索引有、SQLite 没有 | 记录被删了，投影还在 |
+
+**`reachable: NO` 时会打印原因而不是抛异常。** 一个在你要诊断它时崩溃的
+状态命令，等于什么都没告诉你。
+
+### 18.3 增量补齐
+
+```bash
+... python -m aer.knowledge project
+```
+
+把 store 里还没投影（或已变化）的经验补上。每条记录是**替换**而不是追加，
+所以对已有索引重复运行是安全的。日常用法是"提炼完一批经验之后跑一次"。
+
+### 18.4 重建（万能的修法）
+
+```bash
+... python -m aer.knowledge rebuild
+```
+
+这四种情况都用它，不需要区分：
+
+```text
+知识库损坏 / 结构版本不符 / drift 不为 none / 目录被整个删掉
+```
+
+实现方式：在 `aer-knowledge.rebuilding` 建一份新的 → 用计数与指纹校验 →
+**原子替换** → 删掉旧的。任一步失败，线上索引**毫发无损**；
+`aer-knowledge.previous` 只是替换过程中的临时名。
+
+重建只读 SQLite，从不写它。这是整个设计的要点：索引可丢弃，事实源不可。
+
+一千条经验的重建约两秒（一次含写入的事务提交约 900ms，与语句数无关，
+所以投影按批提交——D-063）。
+
+### 18.5 知识库丢失的恢复
+
+```bash
+# 1. 确认丢了什么
+docker compose ... run --rm aer-runtime python -m aer.knowledge status
+#    → reachable: NO 或 index experiences 明显偏小
+
+# 2. 重建（这就是全部恢复步骤）
+docker compose ... run --rm aer-runtime python -m aer.knowledge rebuild
+
+# 3. 确认
+docker compose ... run --rm aer-runtime python -m aer.knowledge status
+#    → drift: none
+```
+
+**不要去恢复 SQLite 备份。** store 没坏；从备份恢复会丢掉部署之后写入的经验，
+而且修不了索引。
+
+### 18.6 备份策略
+
+知识库**不纳入关键备份资产**（§88）：它是可推导的，物理备份只能加速恢复，
+不能替代 rebuild。`scripts/backup_sqlite.py` 只备份 SQLite，
+**不需要**改成把 `knowledge/` 也打包。
+
+代价要注意：`/srv/aer/knowledge` 目录本身还是要有人在，容器以 uid 10001 运行，
+目录属主必须是它（见 §4「Ownership」）。
+
+### 18.7 升级 `neug` 之前
+
+```bash
+... python /app/scripts/probe_neug_engine.py
+```
+
+它会逐条检查知识层依赖的引擎行为，**非零退出就不要升级**。这些行为大部分
+没有写在文档里，有几条还与文档相反：
+
+```text
+文档说                             引擎实际做
+--------------------------------  ------------------------------------------
+execute() 接受分号分隔的多语句      拒绝（"We do not support preparing multiple
+                                   statements in one query"）
+CREATE INDEX [IF NOT EXISTS]       解析器直接拒绝（"Invalid input <NOT>"）
+SHOW_NODE_TABLES() ...             "function SHOW_NODE_TABLES does not exist"
+bm25 越小越相关                     还**是负值**；1/(1+bm25) 会把排序反转
+（未提及）                          全文查询按 **FTS5 语法**解析：`wp-json 404`
+                                   抛 "no such column: json"
+（未提及）                          LIMIT $参数 被**静默忽略**
+（未提及）                          重复 CREATE 同一条边会产生两条边
+（未提及）                          STRING 等价于 VARCHAR(256)
+（未提及）                          DROP TABLE 节点表会连带删关系表与全文索引
+```
+
+升级后重跑 `tests/knowledge/`（CI 在 ubuntu-latest 上真实安装 neug 并通过它跑
+这些用例），再考虑改 `pyproject.toml` 里的锁定版本（D-055）。
+
+### 18.8 明确不做
+
+```text
+向量检索（HNSW）/ embedding        等真实数据证明 BM25 不够用（D-056）
+neuG 服务模式（db.serve()）         单机单进程下嵌入式更简单（D-061）
+用 Alembic 管图 Schema            结构不符一律 rebuild（D-058）
+跨库事务（2PC / Saga / outbox）    索引是可丢弃的副本（D-057）
+检索时写 usage                     需要任务结果才能定义"有用"（D-060）
+```
+
 ## 17. 本轮明确不做的事
 
 不做，是因为当前只有一台服务器，也因为本轮的目的是"能可靠地构建、验证、发布、迁移、备份和回滚"，而不是堆基础设施：
@@ -870,7 +1028,8 @@ docker run --rm --entrypoint python -v <restored-data>:/data \
 - Redis / Kafka / PostgreSQL
 - 日志聚合（ELK / Loki）、指标（Prometheus / Grafana）
 - FastAPI / Dashboard / HTTP healthcheck
-- NeuG 知识索引、检索（Retrieval）、Embedding
+- 向量检索（HNSW）与 embedding（BM25 + 图过滤已落地，见第 18 节；向量留给 M6.5）
+- 记录 `reuse_count` / `success_rate` 等使用统计（属 M7）
 - 数据库自动降级
 
 未来需要时再引入，并各自记录架构决策。

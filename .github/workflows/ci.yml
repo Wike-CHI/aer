@@ -184,7 +184,15 @@ jobs:
       # Everything the runtime needs must be *in* the image. This is the check that
       # catches "tests are green but the container cannot migrate": the migration
       # scripts and alembic.ini have to survive .dockerignore and the COPY steps.
-      - name: The image ships the package, migrations and alembic.ini
+      #
+      # The retrieval engine is checked here too, and for the same class of reason:
+      # `neug` became an optional extra (D-065) so that `pip install aer-runtime`
+      # works on Windows, which means a bare `--editable .` in the Dockerfile would
+      # produce an image that builds, migrates and passes its smoke test -- and then
+      # raises ImportError on the first retrieval in production. Asserting it against
+      # `requirements.frozen.txt` checks what the image actually installed, rather
+      # than trusting the install line to still say the right thing.
+      - name: The image ships the package, migrations, alembic.ini and the engine
         run: |
           set -Eeuo pipefail
           docker run --rm --entrypoint sh aer-ci:sha-0000000 -c '
@@ -194,6 +202,8 @@ jobs:
             test -f /app/scripts/smoke_test.py
             python -c "import aer; print(\"imported aer\", aer.__version__)"
             python -c "from aer.storage.migrations import head_revision; print(\"head\", head_revision())"
+            grep -q "^neug==" /app/requirements.frozen.txt
+            python -c "import neug; print(\"engine\", neug.__file__)"
           '
 
       # The whole runtime story inside the *shipped image*: create a store with the

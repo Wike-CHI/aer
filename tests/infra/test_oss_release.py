@@ -241,10 +241,28 @@ class TestVersionAndMetadata:
         # every platform, and CI asks for `.[dev,knowledge]` explicitly.
         assert not any(dep.startswith("neug") for dep in extras["dev"])
 
+    def test_ci_verifies_the_image_carries_the_engine_extra(self) -> None:
+        """D-065's production risk has exactly one observable: the image's own install.
+
+        Making `neug` optional meant the Dockerfile had to start asking for it
+        explicitly, and the way that goes wrong is *silent*: the image builds,
+        migrates and passes its smoke test, then raises ImportError on the first
+        retrieval in production. CI therefore asserts it against
+        `requirements.frozen.txt` -- what the image actually installed -- and this
+        test keeps that assertion from being deleted as redundant.
+        """
+        document = read_repo_file(".github/workflows/ci.yml")
+
+        assert 'grep -q "^neug==" /app/requirements.frozen.txt' in document
+        # ...and under a step name that says so, so the check is not hidden away.
+        step = "- name: The image ships the package, migrations, alembic.ini and the engine"
+        assert step in document
+
     def test_importing_aer_does_not_need_the_engine(self) -> None:
         """The extra is only honest while `import aer` works without the engine.
 
-        D-065 moved `neug` out of the required dependencies. That is defensible only
+        D-065 moved `neug` out of the required dependencies.
+        That is defensible only
         if nothing imports it eagerly, so the claim is tested by *blocking* it and
         importing the package in a subprocess. Blocking is what makes the test mean
         something in both environments: here the engine is absent anyway, and in CI it

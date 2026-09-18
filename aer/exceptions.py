@@ -113,3 +113,52 @@ class CandidateValidationError(DistillationError):
     when its list fields contain blank entries. Distinct from "the candidate
     describes a failure": a failure is a perfectly valid thing to record.
     """
+
+
+class KnowledgeError(AERError):
+    """Base class for Knowledge-plane failures (Milestone 6).
+
+    The knowledge plane is a **projection** of the experience store, never a
+    second source of truth, so its failures are deliberately a separate family
+    from :class:`StorageError`: a broken knowledge index says nothing about the
+    durability of the runs and experiences it was built from.
+    """
+
+
+class KnowledgeIndexUnavailable(KnowledgeError):
+    """The knowledge index could not be reached or opened.
+
+    Raised instead of returning an empty result. "There is no relevant
+    experience" and "the knowledge index is broken" are different facts, and an
+    agent that cannot tell them apart will confidently proceed as if it had
+    checked. Callers that want to degrade gracefully must catch this explicitly
+    (round-6 brief, section 80).
+    """
+
+
+class KnowledgeQueryError(KnowledgeError):
+    """A retrieval request was malformed.
+
+    Raised for an empty query, an unknown mode or a mismatch between the policy
+    and the requested filters -- anything where guessing a correction would
+    silently answer a different question than the caller asked.
+    """
+
+
+class ProjectionError(KnowledgeError):
+    """Writing an experience into the knowledge index failed.
+
+    Critically, this never implies the SQLite write failed or should be
+    undone: the experience is already committed and is the durable fact. A
+    raised :class:`ProjectionError` means only that the projection is now stale
+    and a rebuild is due (round-6 brief, sections 56 and 57).
+    """
+
+
+class KnowledgeSchemaError(KnowledgeError):
+    """The knowledge index on disk is not the shape this build expects.
+
+    Carries no repair strategy on purpose: the knowledge database is
+    rebuildable from SQLite, so the answer to a schema mismatch is *rebuild*,
+    not migrate (round-6 brief, section 77).
+    """

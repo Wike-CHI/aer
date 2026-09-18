@@ -149,3 +149,43 @@ class DistillationTrigger(StrEnum):
 
     EXPLICIT_HIGH_VALUE = "EXPLICIT_HIGH_VALUE"
     """The caller asked for this run to be kept regardless of the signals."""
+
+
+class RetrievalMode(StrEnum):
+    """How much of the experience store a retrieval query is allowed to see.
+
+    Declared in **increasing permissiveness**, which is also the trust order:
+    a caller asking for guidance wants an answer it can act on, and widening the
+    mode trades that guarantee for coverage. Keeping them in one vocabulary (and
+    in this module, per the project-wide "enums live here" rule) means the policy
+    and the formatter cannot drift apart on what a mode means.
+
+    * ``GUIDANCE``   -- only independently confirmed outcomes (``SUCCESS`` or
+      ``RECOVERY`` with ``status >= VERIFIED`` and ``outcome_verified``), plus
+      ``FAILURE`` records demoted to warnings. This is the default because it is
+      the only mode whose output may be presented as something that *works*.
+    * ``DIAGNOSTIC`` -- everything ``GUIDANCE`` returns, plus unverified
+      observations, which are labelled as such and never called a solution.
+    * ``ALL``        -- ``DIAGNOSTIC`` plus deprecated experiences, and only when
+      the caller asks for them explicitly. Deprecated knowledge is understood to
+      be wrong, so it never leaks in by default.
+    """
+
+    GUIDANCE = "GUIDANCE"
+    DIAGNOSTIC = "DIAGNOSTIC"
+    ALL = "ALL"
+
+
+class ProjectionAction(StrEnum):
+    """What a projection pass did to one experience.
+
+    Recorded instead of a boolean because "wrote it" and "removed it because the
+    store no longer has it" are opposite outcomes that both mean success, and a
+    caller that logs ``projected=True`` for a deletion has lost the plot.
+    """
+
+    PROJECTED = "PROJECTED"
+    """The index now carries this experience's current content."""
+
+    REMOVED = "REMOVED"
+    """The store no longer has it, so its projection was deleted."""

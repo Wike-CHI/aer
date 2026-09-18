@@ -65,6 +65,27 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install --editable '.[dev]'
 
+      # Fetch the NeuG full-text extension into the runner's Python environment,
+      # exactly as the image does at build time. `LOAD fts` fails without it, so
+      # skipping this step would make every knowledge test fail rather than skip --
+      # noisier, but a missing extension is a real problem and should not be silent.
+      #
+      # This is also the one place CI touches the network beyond pip: the extension
+      # comes from Alibaba OSS. If that host is ever unreachable from a GitHub
+      # runner, this step says so, which is better than discovering it during a
+      # production build.
+      - name: Install the NeuG extensions
+        run: python scripts/install_neug_extensions.py
+
+      # `pytest.importorskip` is the right call in the knowledge tests -- there is
+      # no NeuG wheel for macOS or Windows -- but it would also turn "the engine
+      # failed to install here" into a green build with two silently skipped files.
+      # This step makes that specific failure loud.
+      - name: The NeuG engine must be importable
+        run: |
+          set -Eeuo pipefail
+          python -c "import neug; print('neug', neug.__version__)"
+
       - name: Lint
         run: ruff check .
 

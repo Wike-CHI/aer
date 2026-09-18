@@ -11,6 +11,7 @@ is atomic on its own.
 from __future__ import annotations
 
 import builtins
+from collections.abc import Sequence
 from typing import Any
 
 from sqlalchemy import Select, func, select
@@ -263,6 +264,33 @@ class ExperienceSourceRepository:
             )
             total = int(session.execute(statement).scalar_one())
         return total
+
+    def list_all_for(self, experience_ids: Sequence[str]) -> list[tuple[str, str]]:
+        """Every ``(experience_id, run_id)`` link for the given experiences.
+
+        One query for a whole page of experiences, which is what keeps the
+        knowledge projector from becoming an N+1: it needs the source runs of every
+        record it projects, and asking per record would issue a query per row for
+        data that is already indexed on the column being filtered.
+
+        Ordered by link creation time, so the tuple order is stable across runs and
+        a projected relation set does not depend on physical row order.
+        """
+        if not experience_ids:
+            return []
+        links: list[tuple[str, str]]
+        with self._database.session("load source links for experiences") as session:
+            statement = (
+                select(ExperienceSourceRow.experience_id, ExperienceSourceRow.run_id)
+                .where(ExperienceSourceRow.experience_id.in_(list(experience_ids)))
+                .order_by(
+                    ExperienceSourceRow.experience_id.asc(),
+                    ExperienceSourceRow.created_at.asc(),
+                    ExperienceSourceRow.run_id.asc(),
+                )
+            )
+            links = [(row[0], row[1]) for row in session.execute(statement).all()]
+        return links
 
     def remove(self, experience_id: str, run_id: str) -> None:
         """Delete one link.

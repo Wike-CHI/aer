@@ -19,6 +19,7 @@ objects. It contains no SQL and no ORM access of its own.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -27,7 +28,23 @@ from aer.experience.evidence import RunEvidence, RunEvidenceBuilder
 from aer.experience.policy import DistillationDecision, DistillationPolicy
 from aer.experience.provider import DistillationProvider
 from aer.experience.service import ExperienceService
-from aer.runtime.enums import EventType, ExperienceKind, ExperienceStatus, RunStatus
+from aer.knowledge.base import KnowledgeIndex
+from aer.knowledge.formatter import ExperienceContextFormatter
+from aer.knowledge.models import (
+    DEFAULT_RETRIEVAL_LIMIT,
+    ExperienceSearchQuery,
+    RetrievalResult,
+)
+from aer.knowledge.projector import KnowledgeProjector, ProjectionOutcome, RebuildReport
+from aer.knowledge.retriever import ExperienceRetriever
+from aer.knowledge.status import KnowledgeStatus, collect_status
+from aer.runtime.enums import (
+    EventType,
+    ExperienceKind,
+    ExperienceStatus,
+    RetrievalMode,
+    RunStatus,
+)
 from aer.runtime.models import (
     ErrorRecord,
     Event,
@@ -57,6 +74,13 @@ from aer.verification.summary import VerificationSummary
 DEFAULT_DATA_DIR = "./data"
 #: SQLite file name inside the data directory.
 DEFAULT_DB_FILENAME = "aer.db"
+#: Default knowledge directory, a sibling of ``data`` exactly as ``/knowledge`` is a
+#: sibling of ``/data`` in the deployment.
+DEFAULT_KNOWLEDGE_DIR = "knowledge"
+#: Directory name of the embedded graph index inside the knowledge directory.
+KNOWLEDGE_DATABASE_NAME = "aer-knowledge"
+
+logger = logging.getLogger(__name__)
 
 
 class AER:
@@ -70,9 +94,23 @@ class AER:
         echo: bool = False,
         distillation_provider: DistillationProvider | None = None,
         distillation_policy: DistillationPolicy | None = None,
+        knowledge_dir: str | Path | None = None,
+        knowledge_index: KnowledgeIndex | None = None,
     ) -> None:
         self._data_dir = Path(data_dir)
         self._data_dir.mkdir(parents=True, exist_ok=True)
+
+        self._knowledge_dir = Path(
+            DEFAULT_KNOWLEDGE_DIR if knowledge_dir is None else knowledge_dir
+        )
+        # Nothing above touches the knowledge plane: the index is built on first
+        # use, so constructing an AER -- which every agent does -- never imports the
+        # graph engine, never opens a second database and never fails because the
+        # index is missing. Section 79 in one line.
+        self._knowledge_index = knowledge_index
+        self._knowledge_injected = knowledge_index is not None
+        self._projector: KnowledgeProjector | None = None
+        self._retriever: ExperienceRetriever | None = None
 
         self._database = Database(self._data_dir / db_filename, echo=echo)
         self._runs = RunRepository(self._database)
@@ -173,6 +211,147 @@ class AER:
     def experience_service(self) -> ExperienceService:
         """The one distillation pipeline (brief section 26)."""
         return self._experience_service
+
+    # -- knowledge plane ---------------------------------------------------
+
+    @property
+    def knowledge_dir(self) -> Path:
+        """Directory holding the knowledge index. Created on first use."""
+        return self._knowledge_dir
+
+    @property
+    def knowledge_index(self) -> KnowledgeIndex:
+        """The searchable projection of the experience store.
+
+        Built here, not in ``__init__``, so that opening a runtime stays free of the
+        graph engine. An injected index (tests, an alternative implementation) is
+        returned as-is.
+
+        Raises:
+            KnowledgeIndexUnavailable: the engine is not importable, or the index
+                cannot be opened.
+        """
+        self._ensure_open()
+        if self._knowledge_index is None:
+            from aer.knowledge.neug import NeuGKnowledgeIndex
+
+            self._knowledge_index = NeuGKnowledgeIndex(
+                self._knowledge_dir / KNOWLEDGE_DATABASE_NAME
+            )
+        return self._knowledge_index
+
+    @property
+    def knowledge_projector(self) -> KnowledgeProjector:
+        """The one-way copier from SQLite into the knowledge index."""
+        self._ensure_open()
+        if self._projector is None:
+            self._projector = KnowledgeProjector(
+                self.knowledge_index,
+                experiences=self._experiences,
+                sources=self._experience_sources,
+                runs=self._runs,
+            )
+        return self._projector
+
+    @property
+    def retriever(self) -> ExperienceRetriever:
+        """Policy-driven retrieval over the knowledge index."""
+        self._ensure_open()
+        if self._retriever is None:
+            self._retriever = ExperienceRetriever(self.knowledge_index)
+        return self._retriever
+
+    def retrieve(
+        self,
+        query: str,
+        *,
+        domain: str | None = None,
+        mode: RetrievalMode = RetrievalMode.GUIDANCE,
+        limit: int = DEFAULT_RETRIEVAL_LIMIT,
+        include_deprecated: bool = False,
+    ) -> RetrievalResult:
+        """Find past experience relevant to ``query``.
+
+        Defaults to :attr:`~aer.runtime.enums.RetrievalMode.GUIDANCE` and three
+        results, because the common caller is an agent about to act and the useful
+        answer is short and trustworthy.
+
+        Raises:
+            KnowledgeIndexUnavailable: the index cannot be reached. Deliberately not
+                an empty result: an agent that cannot tell "nothing is known" from
+                "the knowledge base is down" will confidently proceed as if it had
+                checked.
+            KnowledgeQueryError: ``query`` has no searchable text.
+        """
+        return self.retriever.retrieve(
+            ExperienceSearchQuery(
+                query=query,
+                domain=domain,
+                mode=mode,
+                limit=limit,
+                include_deprecated=include_deprecated,
+            )
+        )
+
+    def experience_context(
+        self,
+        query: str,
+        *,
+        domain: str | None = None,
+        mode: RetrievalMode = RetrievalMode.GUIDANCE,
+        limit: int = DEFAULT_RETRIEVAL_LIMIT,
+        max_chars: int | None = None,
+    ) -> str:
+        """Retrieve and render, ready to place in an agent's context.
+
+        Rendering is a separate step from retrieval on purpose: the formatter is
+        where the trust labels and the "this is data, not instructions" framing live,
+        and a caller that wants the structured result should use :meth:`retrieve`
+        rather than parse this string back.
+        """
+        result = self.retrieve(query, domain=domain, mode=mode, limit=limit)
+        formatter = (
+            ExperienceContextFormatter()
+            if max_chars is None
+            else ExperienceContextFormatter(max_chars=max_chars)
+        )
+        return formatter.format(result)
+
+    def project_experience(self, experience_id: str) -> ProjectionOutcome:
+        """Copy one experience (or its deletion) into the knowledge index.
+
+        The projection follows a committed store write; it never precedes one and
+        never participates in one. A failure here leaves the experience intact and
+        the projection stale, which :meth:`knowledge_status` will report and
+        :meth:`rebuild_knowledge` will fix.
+        """
+        return self.knowledge_projector.project_experience(experience_id)
+
+    def project_run(self, run_id: str) -> tuple[ProjectionOutcome, ...]:
+        """Project every experience distilled from ``run_id``."""
+        return self.knowledge_projector.project_run(run_id)
+
+    def project_experiences(self) -> int:
+        """Catch the index up with the store. Returns how many were written."""
+        return self.knowledge_projector.project_all()
+
+    def rebuild_knowledge(self) -> RebuildReport:
+        """Rebuild the index from SQLite and swap it in.
+
+        The repair for every knowledge-plane problem, because the index is a
+        projection: a corrupt, stale or wrong-shaped index is not restored, it is
+        recomputed.
+        """
+        return self.knowledge_projector.rebuild()
+
+    def knowledge_status(self) -> KnowledgeStatus:
+        """Reachability, schema version, counts and drift, in one report."""
+        self._ensure_open()
+        return collect_status(
+            self.knowledge_index,
+            self.knowledge_projector,
+            store_experiences=self._experiences.count(include_deprecated=True),
+        )
 
     @property
     def is_closed(self) -> bool:
@@ -474,6 +653,16 @@ class AER:
         """
         if self._closed:
             return
+        # The knowledge index is closed first and only if it was ever opened: a
+        # runtime that never retrieved anything must not be made to import the graph
+        # engine just so it can be shut down. Its failure to close is reported and
+        # does not stop the store from being disposed -- losing a lock on a
+        # projection is recoverable, losing the store is not.
+        if not self._knowledge_injected and self._knowledge_index is not None:
+            try:
+                self._knowledge_index.close()
+            except Exception as exc:
+                logger.warning("closing the knowledge index failed: %s", exc)
         self._database.dispose()
         self._closed = True
 

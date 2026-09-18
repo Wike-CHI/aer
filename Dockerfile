@@ -91,6 +91,19 @@ COPY scripts/ ./scripts/
 RUN python -m pip install --no-cache-dir --editable . \
  && python -m pip freeze --exclude-editable > /app/requirements.frozen.txt
 
+# Fetch the NeuG full-text extension into the image, and verify it landed.
+#
+# This is the one build step with a network dependency, and it is here on purpose.
+# `LOAD fts` fails on a fresh install: the engine is in the wheel, the full-text
+# extension is not, and it is downloaded on first `INSTALL` from Alibaba OSS into
+# the *Python environment* -- not into /knowledge, which is a bind mount. A runtime
+# image without it would need the network on the first retrieval of its life, and
+# would be unable to search at all during an outage. Moving the fetch to build time
+# makes the image hermetic; the cost is that this step fails when the extension
+# host is unreachable, which is the failure we want to see here rather than later.
+RUN python /app/scripts/install_neug_extensions.py \
+ && chmod -R a+rX "$(python -c 'import neug, pathlib; print(pathlib.Path(neug.__file__).parent.parent)')/extension"
+
 # Created here so that (a) a bare `docker run` without mounts still works and
 # (b) the mount points exist with the right owner. Bind mounts shadow them; the
 # host directories are what actually persists.

@@ -135,6 +135,19 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install --editable '.[dev]'
 
+      # Mirrors the CI job. Without this the knowledge-engine tests would skip
+      # here -- there is no NeuG wheel for the platforms CI might otherwise run on,
+      # and `importorskip` cannot tell "not applicable" from "failed to install" --
+      # so the gate that guards a deployment would quietly check less than the gate
+      # that guards a pull request.
+      - name: Install the NeuG extensions
+        run: python scripts/install_neug_extensions.py
+
+      - name: The NeuG engine must be importable
+        run: |
+          set -Eeuo pipefail
+          python -c "import neug; print('neug', neug.__version__)"
+
       - name: Lint
         run: ruff check .
 

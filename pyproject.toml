@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aer-runtime"
-version = "0.4.0"
+version = "0.6.0"
 description = "AER - Agent Experience Runtime (SQLite lightweight edition)"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -12,6 +12,16 @@ license = { text = "Apache-2.0" }
 
 dependencies = [
     "alembic>=1.13",
+    # Pinned exactly, unlike every other dependency here, and for a concrete
+    # reason rather than caution: the knowledge layer is written against this
+    # engine's *observed* behaviour -- BM25 coming back negative, `execute()`
+    # refusing multiple statements, no MERGE, no edge de-duplication, a full-text
+    # query parsed as FTS5 syntax -- and against a schema whose CHECK constraints
+    # the extension download URL also embeds (`.../extensions/v0.2.0/...`). A minor
+    # bump has already rebuilt the whole index framework once (v0.2 introduced it),
+    # so a range here would mean shipping code that was verified against something
+    # else. docs/DECISIONS.md D-055 records when to revisit this.
+    "neug==0.2.0",
     "pydantic>=2.7",
     "sqlalchemy>=2.0",
 ]
@@ -59,6 +69,12 @@ known-first-party = ["aer", "tests"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["B011"]
+# The knowledge tests carry a Chinese/English corpus, and fullwidth punctuation
+# inside it is data rather than prose: the whole point of the mixed-language cases
+# is that the tokenizer sees what a Chinese operator would actually type. RUF001
+# exists to catch a comma that looks like a comma in code; here it would only
+# pressure the fixtures into English.
+"tests/knowledge/**" = ["B011", "RUF001"]
 # scripts/ are file-invoked operator entry points, not a package, so a sibling
 # import has to sit below the sys.path fix-up that makes it resolvable.
 "scripts/restore_sqlite.py" = ["E402"]
@@ -75,3 +91,11 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 no_implicit_optional = true
 show_error_codes = true
+
+# NeuG ships no type stubs and no py.typed marker. The override is unconditional
+# rather than a per-import ignore because the answer differs by machine -- the
+# package is absent on a Windows checkout and present in CI -- and two different
+# error codes would otherwise have to be silenced in the same file.
+[[tool.mypy.overrides]]
+module = ["neug", "neug.*"]
+ignore_missing_imports = true

@@ -65,6 +65,11 @@ from aer.exceptions import (
     ExperienceError,
     ExperienceLifecycleError,
     HookStateError,
+    KnowledgeError,
+    KnowledgeIndexUnavailable,
+    KnowledgeQueryError,
+    KnowledgeSchemaError,
+    ProjectionError,
     RecordNotFoundError,
     RunStateError,
     StorageError,
@@ -83,11 +88,28 @@ from aer.experience.evidence import RunEvidence, RunEvidenceBuilder
 from aer.experience.policy import DEFAULT_POLICY, DistillationDecision, DistillationPolicy
 from aer.experience.provider import CallableDistillationProvider, DistillationProvider
 from aer.experience.service import ExperienceService
+from aer.knowledge.formatter import ExperienceContextFormatter
+from aer.knowledge.models import (
+    DEFAULT_RETRIEVAL_LIMIT,
+    MAX_RETRIEVAL_LIMIT,
+    ExperienceSearchQuery,
+    RetrievalHit,
+    RetrievalResult,
+)
+from aer.knowledge.projector import (
+    DriftReport,
+    KnowledgeProjector,
+    ProjectionOutcome,
+    RebuildReport,
+)
+from aer.knowledge.status import KnowledgeStatus
 from aer.runtime.enums import (
     DistillationTrigger,
     EventType,
     ExperienceKind,
     ExperienceStatus,
+    ProjectionAction,
+    RetrievalMode,
     RunStatus,
     VerifierType,
 )
@@ -130,12 +152,14 @@ from aer.verification.human import HumanVerifier
 from aer.verification.llm import LLMVerifier
 from aer.verification.summary import VerificationSummary, is_verified_success
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     "AER",
     "ALLOWED_TRANSITIONS",
     "DEFAULT_POLICY",
+    "DEFAULT_RETRIEVAL_LIMIT",
+    "MAX_RETRIEVAL_LIMIT",
     "AERError",
     "CallableDistillationProvider",
     "CallableEnvironmentVerifier",
@@ -149,15 +173,18 @@ __all__ = [
     "DistillationPolicy",
     "DistillationProvider",
     "DistillationTrigger",
+    "DriftReport",
     "ErrorRecord",
     "Event",
     "EventType",
     "Experience",
     "ExperienceCandidate",
+    "ExperienceContextFormatter",
     "ExperienceDistiller",
     "ExperienceError",
     "ExperienceKind",
     "ExperienceLifecycleError",
+    "ExperienceSearchQuery",
     "ExperienceService",
     "ExperienceSource",
     "ExperienceStatus",
@@ -166,11 +193,24 @@ __all__ = [
     "HttpStatusVerifier",
     "HumanVerifier",
     "JsonValidVerifier",
+    "KnowledgeError",
+    "KnowledgeIndexUnavailable",
+    "KnowledgeProjector",
+    "KnowledgeQueryError",
+    "KnowledgeSchemaError",
+    "KnowledgeStatus",
     "LLMVerifier",
     "PredicateVerifier",
+    "ProjectionAction",
+    "ProjectionError",
+    "ProjectionOutcome",
+    "RebuildReport",
     "RecordNotFoundError",
     "RecoveryContext",
     "RecoveryRecord",
+    "RetrievalHit",
+    "RetrievalMode",
+    "RetrievalResult",
     "Run",
     "RunContext",
     "RunEvidence",

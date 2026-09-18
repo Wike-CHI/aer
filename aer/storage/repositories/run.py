@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from sqlalchemy import func, select
 
 from aer.exceptions import RecordNotFoundError
@@ -88,6 +90,22 @@ class RunRepository:
                 statement = statement.where(RunRow.task_type == task_type)
             total = int(session.execute(statement).scalar_one())
         return total
+
+    def get_many(self, run_ids: Sequence[str]) -> dict[str, Run]:
+        """Load several runs by id in one query, keyed by id.
+
+        Exists for the knowledge projector, which needs a reference node per source
+        run and would otherwise issue one query per experience -- the N+1 that
+        section 83 of the round-6 brief rules out. Ids that do not exist are simply
+        absent from the result: a caller that needs to know has ``len()``.
+        """
+        if not run_ids:
+            return {}
+        runs: dict[str, Run]
+        with self._database.session("load runs by id") as session:
+            statement = select(RunRow).where(RunRow.id.in_(list(run_ids)))
+            runs = {row.id: _to_domain(row) for row in session.execute(statement).scalars().all()}
+        return runs
 
 
 # ---------------------------------------------------------------------------

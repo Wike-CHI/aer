@@ -1,0 +1,227 @@
+# Publishing workflow for AER.
+#
+# What it does: when a GitHub Release is published, build the sdist and the wheel
+# from *that* tag, check they are installable and that the installed package can
+# still provision a database, and upload them to PyPI.
+#
+# Four decisions are worth reading before changing anything here:
+#
+#   * **There is no PyPI credential in this repository, and there never will be.**
+#     Uploads use PyPI's Trusted Publishing: the job asks GitHub for a short-lived
+#     OIDC token (`id-token: write`) and PyPI accepts it because the publisher
+#     (repository + workflow + environment) was registered on PyPI once, by hand.
+#     That is why `permissions` is empty at the workflow level and the upload job
+#     asks for exactly two scopes: a token is not a secret that can leak from here,
+#     because it does not exist until the job runs.
+#
+#   * **The tag must equal the packaged version.** A release whose tag says
+#     v0.6.0 while `project.version` says something else produces a distribution
+#     nobody can correlate with the source. Checked before anything is built, and
+#     again against the built artifact, because `pyproject.toml` is not the only
+#     way a version can change.
+#
+#   * **Build and upload are one job on purpose.** Splitting them would mean
+#     passing the distribution through `actions/upload-artifact` and a second
+#     download, and the bytes that reach PyPI would no longer be provably the bytes
+#     that were verified. Nothing leaves this job.
+#
+#   * **The artifact is exercised, not just inspected.** `twine check` validates
+#     metadata; it cannot tell you that the installed package can open a database.
+#     The migration scripts live inside the package precisely so that a plain
+#     `pip install` works (docs/DECISIONS.md D-064), and a wheel that lost them
+#     would still pass every metadata check -- so the smoke test below installs the
+#     built wheel and constructs a real store with it.
+#
+# Action versions follow the repository's convention (checkout/setup-python v7,
+# which run on the Node 24 runner and need a runner of at least v2.327.1;
+# `ubuntu-latest` satisfies this). `pypa/gh-action-pypi-publish@release/v1` is the
+# pin PyPI itself documents for Trusted Publishing.
+
+name: publish
+
+on:
+  release:
+    types: [published]
+  # The retry path, and the only safe way to exercise this workflow before the
+  # PyPI-side publisher exists: run it by hand with `dry_run: true`.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.6.0). Required when not triggered by a release."
+        required: false
+        default: ""
+      dry_run:
+        description: 'Set to the string "true" to build and verify without uploading to PyPI.'
+        required: false
+        default: "false"
+
+# Empty by default: each job grants only what it needs. Nothing here reads a secret.
+permissions: {}
+
+# Two publishes must not race for the same version number -- PyPI would reject the
+# second one anyway, but failing fast is clearer than a partial upload. Not
+# cancelled in progress: an interrupted upload is worse than a slow one.
+concurrency:
+  group: pypi-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+  PACKAGE_NAME: aer-runtime
+
+jobs:
+  publish:
+    name: build and publish to PyPI
+    runs-on: ubuntu-latest
+    # `environment: pypi` is not decoration: it is the `environment` value that must
+    # be registered as part of the PyPI Trusted Publisher, and it is what lets the
+    # repository add required reviewers to a publish without editing this file.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/aer-runtime
+    permissions:
+      # `id-token: write` is what mints the OIDC token PyPI exchanges for an upload
+      # token. `contents: read` is checkout. There is no third scope, and adding one
+      # would need a sentence here saying why.
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout the released tag
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # Resolved once, here, so every later step compares against the same string.
+      # `github.event.release.tag_name` is set only for a release trigger, and
+      # `GITHUB_REF_NAME` would be the branch name for a manual run -- taking it
+      # from the event when it exists is what keeps the two paths honest.
+      - name: Resolve the version to publish
+        id: version
+        run: |
+          set -Eeuo pipefail
+          tag="${{ github.event.release.tag_name }}"
+          if [ -z "${tag}" ]; then
+            tag="${{ inputs.tag }}"
+          fi
+          if [ -z "${tag}" ]; then
+            echo "::error::no tag to publish: pass one, or trigger this from a Release"
+            exit 1
+          fi
+          if [ "${tag#v}" = "${tag}" ]; then
+            echo "::error::tag '${tag}' must look like vX.Y.Z"
+            exit 1
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${tag#v}" >> "${GITHUB_OUTPUT}"
+          echo "publishing ${tag}"
+
+      - name: The tag must match the packaged version
+        run: |
+          set -Eeuo pipefail
+          declared="$(python -c '
+          import pathlib, tomllib
+          data = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+          print(data["project"]["version"])
+          ')"
+          if [ "${declared}" != "${{ steps.version.outputs.version }}" ]; then
+            echo "::error::tag ${{ steps.version.outputs.tag }} does not match project.version ${declared}"
+            echo "::error::bump pyproject.toml (and aer/__init__.py) or retag; do not publish a mismatch"
+            exit 1
+          fi
+          echo "tag and project.version agree on ${declared}"
+
+      - name: Install the build tooling
+        run: |
+          set -Eeuo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade build twine
+
+      - name: Build the sdist and the wheel
+        run: python -m build
+
+      # `twine check` reads the metadata and the README the way PyPI will. A README
+      # that fails to render is not a build failure -- it is a silently mangled
+      # project page -- so it is checked here rather than noticed afterwards.
+      - name: Validate the distribution metadata
+        run: python -m twine check --strict dist/*
+
+      # The version has to be checked against the *artifact*, not only against
+      # pyproject.toml: a stale sdist or an unexpected build backend would show up
+      # here and nowhere earlier.
+      - name: The built artifacts carry the released version
+        run: |
+          set -Eeuo pipefail
+          version="${{ steps.version.outputs.version }}"
+          test -f "dist/${PACKAGE_NAME}-${version}.tar.gz"
+          test -f "dist/${PACKAGE_NAME}-${version}-py3-none-any.whl"
+          python - <<'PY'
+          import glob, os, zipfile
+          version = os.environ["RELEASE_VERSION"]
+          wheel = glob.glob("dist/*.whl")
+          assert len(wheel) == 1, wheel
+          metadata = next(
+              name for name in zipfile.ZipFile(wheel[0]).namelist() if name.endswith(".dist-info/METADATA")
+          )
+          text = zipfile.ZipFile(wheel[0]).read(metadata).decode()
+          fields = dict(
+              line.split(": ", 1) for line in text.splitlines() if ": " in line and not line.startswith(" ")
+          )
+          assert fields["Name"] == "aer-runtime", fields["Name"]
+          assert fields["Version"] == version, fields["Version"]
+          assert fields.get("License-Expression") == "Apache-2.0", fields.get("License-Expression")
+          print("wheel metadata:", fields["Name"], fields["Version"], fields["License-Expression"])
+          PY
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+
+      # The check that `twine check` structurally cannot make. Install the *built*
+      # wheel -- with its declared dependencies resolved, so a broken requirement
+      # spec fails here instead of in a user's environment -- and use it to create
+      # and migrate a store. The wheel carries its own copy of the migration
+      # scripts (setup.py); if that copy is missing or unreadable, `AER(...)` raises
+      # StorageError on construction and this step fails the release.
+      - name: The built wheel can open and migrate a store
+        run: |
+          set -Eeuo pipefail
+          workdir="$(mktemp -d)"
+          python -m venv "${workdir}/venv"
+          "${workdir}/venv/bin/python" -m pip install --upgrade pip
+          "${workdir}/venv/bin/python" -m pip install dist/*.whl
+          "${workdir}/venv/bin/python" - "${workdir}/data" <<'PY'
+          import sys
+          from pathlib import Path
+
+          import aer
+          from aer import AER
+
+          data = Path(sys.argv[1])
+          print("installed from:", aer.__file__)
+          print("aer.__version__:", aer.__version__)
+
+          with AER(str(data)) as runtime:
+              runtime.start_run(task="release smoke test", task_type="oss-release").success()
+              print("runs:", runtime.runs.count())
+
+          from aer.storage.migrations import current_revision
+
+          print("revision:", current_revision(data / "aer.db"))
+          PY
+          # A clean venv is the point: it proves the wheel is self-sufficient, which
+          # the workspace (with its editable install and checkout) can never show.
+          rm -rf "${workdir}"
+
+      # `dry_run` exists so this workflow can be exercised before the PyPI-side
+      # publisher is registered: everything above still runs. It is a *string*
+      # input rather than a boolean one because `inputs` is empty on a
+      # release-triggered run, and comparing against a literal is the one form that
+      # reads the same on both paths.
+      - name: Upload to PyPI (Trusted Publishing)
+        if: inputs.dry_run != 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Skip note
+        if: inputs.dry_run == 'true'
+        run: 'echo "dry_run: skipping the PyPI upload; the artifacts above were built and verified"'

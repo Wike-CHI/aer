@@ -252,9 +252,21 @@ class TestDockerfile:
 
         for required in ("aer/", "migrations/", "alembic.ini", "pyproject.toml", "scripts/"):
             assert required in copies, f"the runtime image must contain {required}"
+        # `LICENSE` is not decoration: `project.license-files` in pyproject.toml
+        # names it, so an image build that leaves it out of the context fails while
+        # building the editable install's metadata.
+        assert "LICENSE" in copies, "the image build must carry the license it declares"
 
     def test_installs_the_package_editable_and_without_dev_tools(self) -> None:
-        """Editable is load-bearing: migrations are located by walking up from the package."""
+        """Editable is a *layout* choice now, not a correctness requirement.
+
+        It used to be load-bearing -- migrations were located by walking up from the
+        package, so a non-editable install could not migrate at all (D-040). D-064
+        removed that constraint by bundling the scripts. It is kept because `/app`
+        is meant to be a readable source tree: the entry points under `/app/scripts`
+        are executed as files, and an operator debugging a failed deployment must be
+        able to read the code the image is actually running.
+        """
         installs = " ".join(instructions_named("RUN"))
 
         assert "--editable ." in installs
@@ -638,6 +650,15 @@ class TestRepositoryHygiene:
         ".gitignore",
         "README.md",
         "agent.md",
+        # Packaging and licence files: they are shipped to users and read by build
+        # tools, so a credential accidentally pasted into one is just as exposed as
+        # one in the Dockerfile.
+        "setup.py",
+        "MANIFEST.in",
+        "LICENSE",
+        # Community health files, published on the repository front page.
+        "CONTRIBUTING.md",
+        "SECURITY.md",
     )
 
     @staticmethod
@@ -693,5 +714,14 @@ class TestRepositoryHygiene:
             "scripts/smoke_test.sh",
             ".github/workflows/ci.yml",
             ".github/workflows/deploy.yml",
+            # Publishing and licensing surface. Listed here for the same reason as
+            # the rest: these are files a *user* depends on, and their absence is
+            # invisible until someone tries to install or contribute.
+            ".github/workflows/publish.yml",
+            "LICENSE",
+            "CONTRIBUTING.md",
+            "SECURITY.md",
+            "setup.py",
+            "MANIFEST.in",
         ):
             assert repo_file(relative).is_file(), f"missing deliverable: {relative}"

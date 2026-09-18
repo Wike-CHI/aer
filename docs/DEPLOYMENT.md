@@ -1100,3 +1100,96 @@ mtime  : 2026-09-16 02:15:39 -0700      （演练前后一致）
 - 数据库自动降级
 
 未来需要时再引入，并各自记录架构决策。
+
+---
+
+## 20. 发布到 PyPI（Release / Trusted Publishing）
+
+### 发布是什么形状
+
+Tag 驱动，不手工上传：
+
+```text
+main 全绿 → 版本号一致（pyproject.version == aer.__version__）
+         → 打 tag vX.Y.Z → 创建 GitHub Release（published）
+         → .github/workflows/publish.yml：build → twine check → 干净 venv 里装 wheel 建库
+         → PyPI Trusted Publishing（OIDC）上传
+```
+
+`publish.yml` 只有一个 job，这是刻意的：**上传的字节就是被验证的字节**。拆成两个 job
+就要经 `upload-artifact` / `download-artifact` 转手一遍，那时"PyPI 上那份"与"验证过的那份"
+之间就只靠约定，而不是靠结构。
+
+仓库里**没有也不会有任何 PyPI 凭据**：上传用的是 PyPI Trusted Publishing——job 向 GitHub
+要一个短期 OIDC token（`id-token: write`），PyPI 之所以接受它，是因为 publisher
+（仓库 + workflow + environment）已经在 PyPI 网站上登记过一次。所以 workflow 顶层
+`permissions: {}`，上传 job 只要两个 scope。
+
+### 一次性人工配置（仓库端做不到）
+
+这几步**只能人工在网站上做**，代码仓库里无法完成：
+
+1. **PyPI 上登记 Trusted Publisher。**
+   登录 PyPI → `Your projects` → `Publishing` → `Add a pending publisher`，填：
+
+   | 字段 | 值 |
+   | --- | --- |
+   | PyPI Project Name | `aer-runtime` |
+   | Owner | `Wike-CHI` |
+   | Repository name | `aer` |
+   | Workflow name | `publish.yml` |
+   | Environment name | `pypi` |
+
+   四个值必须与 `publish.yml` **逐字**一致。`environment` 名字对不上时的表现是
+   OIDC 交换被拒，而不是"少了一个设置"，所以先把名字抄对再排障。
+
+2. **（可选，但建议）给 `pypi` environment 加保护。**
+   GitHub → Settings → Environments → 新建 `pypi` → 加 required reviewers。
+   加了之后，publish job 会停下来等人批准；不加则 Release 一发布就直接上传。
+   加与不加都不需要改 `publish.yml`——这正是用 environment 而不是用变量的原因。
+
+3. **开启 Private Vulnerability Reporting。**
+   Settings → Security → Private vulnerability reporting。
+   `SECURITY.md` 把它列为首选渠道，但它的当前状态是 **未开启**
+   （GitHub API `enabled: false`）。
+
+`aer-runtime` 这个项目名在 PyPI 上**当前未被占用**（2026-09-18 查询返回 404），
+所以不需要改名。**如果将来发现被占用，不要自行换名**——换名会让所有已经发布的文档、
+badge 与安装说明同时失效，那是个需要单独决策的动作。
+
+### 第一次发布的顺序（建议）
+
+在动 PyPI 之前，先用 dry run 把仓库端这条链路跑通：
+
+```text
+GitHub → Actions → publish → Run workflow
+    tag     = v0.6.0
+    dry_run = true
+```
+
+`dry_run` 会执行**除上传以外的全部步骤**：解析 tag、校验 tag 与版本一致、`python -m build`
+（sdist → 从 sdist 出 wheel）、`twine check --strict`、把 wheel 装进一个干净 venv 并真的
+建一个库、读回 revision。这一步能把"制品里没有迁移脚本"这类问题挡在 PyPI 之外——
+而它是真实发生过的故障（见 `docs/DECISIONS.md` D-064）。
+
+dry run 绿了之后，再创建 Release 触发真正的上传。
+
+### 失败与重试
+
+- **PyPI 同一版本号不可重传。** 传错或传漏只能换版本号（或联系 PyPI 支持删除，
+  但那通常是几个工作日）。
+- 如果失败发生在上传**之前**，直接 `Run workflow` 重试，不用动 Release。
+- 如果失败发生在上传**之中/之后**，先看 PyPI 上的文件列表：可能已有部分文件。
+  此时不要重复上传同一个版本号。
+- `workflow_dispatch` 的 `tag` 输入必须填成 `vX.Y.Z`，且等于 `pyproject.toml` 的
+  `version`；不一致时 workflow 会在构建之前就失败。
+
+### 发布后确认
+
+```bash
+pip install --upgrade aer-runtime
+python -c "import aer; print(aer.__version__)"
+python -c "from aer import AER; AER('/tmp/aer-release-check').close()"   # 构造即迁移
+```
+
+第三条是真正的验收：它能过，说明 wheel 里的包自带迁移脚本，`pip install` 是一条自足的路径。

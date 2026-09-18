@@ -1,5 +1,10 @@
 [build-system]
-requires = ["setuptools>=68"]
+# setuptools>=77 is the floor for the PEP 639 license fields below: `license` as an
+# SPDX expression plus `license-files`. The older spelling
+# (`license = { text = "Apache-2.0" }`) still builds but warns that it stops working
+# in 2027, and a distribution metadata format is not something to migrate under
+# deadline pressure.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +13,25 @@ version = "0.6.0"
 description = "AER - Agent Experience Runtime (SQLite lightweight edition)"
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "Apache-2.0" }
+# An SPDX expression, not a table. `license-files` puts the LICENSE text into the
+# sdist and the wheel as well as into the metadata, which Apache-2.0 section 4
+# asks for anyway.
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+
+keywords = ["agent", "agent-runtime", "experience", "sqlite", "verification", "retrieval", "llm"]
+
+# Deliberately no `License ::` classifier: setuptools rejects a license classifier
+# alongside an SPDX `license` expression, and the expression is the modern form.
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 
 dependencies = [
     "alembic>=1.13",
@@ -38,12 +61,31 @@ dev = [
     "pyyaml>=6.0",
 ]
 
+[project.urls]
+Repository = "https://github.com/Wike-CHI/aer"
+Issues = "https://github.com/Wike-CHI/aer/issues"
+Changelog = "https://github.com/Wike-CHI/aer/releases"
+
 [tool.setuptools.packages.find]
 include = ["aer*"]
 
-# ---------------------------------------------------------------------------
-# pytest
-# ---------------------------------------------------------------------------
+# Note for whoever goes looking: there is deliberately **no** `package-data` entry
+# for the migration scripts, and adding one would not do what it looks like it does.
+#
+# The wheel does ship `aer/_migrations/` (alembic.ini + env.py + versions/*.py), but
+# it is staged there at build time by `setup.py`, because the runtime has to be able
+# to provision a database from a plain `pip install` (docs/DECISIONS.md D-064).
+# A `package-data` pattern is resolved relative to the *source* package directory,
+# where `_migrations` does not exist -- and must not, since the repository's
+# `migrations/` is the single source of truth and a second copy next to the package
+# would be one that can silently go stale.
+#
+# What actually carries the files into the wheel is `bdist_wheel` installing the
+# whole `build_lib` tree. That is a property of the build backend rather than of
+# this file, so it is *verified* rather than declared: `.github/workflows/publish.yml`
+# installs the built wheel into a clean virtual environment and constructs a store
+# with it before anything is uploaded.
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]

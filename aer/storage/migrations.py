@@ -56,7 +56,7 @@ def _repository_root() -> Path:
     * **An installed wheel** -- ``aer/_migrations``, staged by ``setup.py``. A
       regular (non-editable) install has no repository root to walk up to, which
       is why ``pip install aer-runtime`` used to produce a library that could not
-      open a database at all (docs/DECISIONS.md D-054, superseding D-040).
+      open a database at all (docs/DECISIONS.md D-064, superseding D-040).
 
     Raises:
         StorageError: neither layout is present, i.e. the installation is broken.

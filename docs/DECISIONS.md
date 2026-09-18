@@ -2661,6 +2661,96 @@ NeuG 把它交给一个 SQLite FTS5 引擎解析。
 
 ---
 
+## D-064 迁移脚本随包分发：构建期复制进 `aer/_migrations/`，运行期增加包内回退
+
+**时间**：2026-09-18
+**里程碑**：开源发布（Release infrastructure）
+
+### 背景
+
+准备正式发布时，`pip install aer-runtime` 被定为受支持路径，于是第一次以**非 editable**
+方式验证了制品本身。结果是失败的，而且失败在第一次使用就发生：
+
+```text
+$ pip install --target /tmp/probe dist/aer_runtime-0.4.0-py3-none-any.whl
+$ PYTHONPATH=/tmp/probe python -c "from aer import AER; AER('/tmp/data')"
+aer.exceptions.StorageError: Cannot locate alembic.ini: AER's migration scripts are
+missing from the installation. Reinstall the package or run from a source checkout.
+```
+
+`AER(...)` 构造即 `upgrade_to_head`，`_repository_root()` 从 `aer/storage/migrations.py`
+**向上**查找 `alembic.ini`；`site-packages` 里没有仓库根目录，所以包装得进去、导得进来、
+**但建不了库**。这不是新问题——D-040 记录过同一段实验，并明确写了"若未来把
+`alembic.ini` + `migrations/` 变成包数据，非 editable 安装即可成立，届时本决策与
+`_repository_root()` 一起重写"。这条决策就是那次重写。
+
+### 问题
+
+非 editable 安装下，迁移脚本该从哪里被找到？
+
+### 候选方案
+
+1. **物理移动**：`git mv migrations aer/migrations`，`alembic.ini` 一并进包，`script_location` 改指过去。
+2. **构建期复制**：`migrations/` 与 `alembic.ini` 留在仓库根（唯一真源），`setup.py` 的 `build_py`
+   在构建时把它们复制进 `build_lib/aer/_migrations/`，运行期在 `_repository_root()` 里加一条包内回退。
+3. **运行期兜底用 `Base.metadata.create_all()`**：找不到迁移脚本时直接按 ORM 建表。
+4. **不解决**：明确不支持 `pip install`，只支持镜像与源码检出，并在文档里写清楚。
+
+### 最终方案
+
+方案 2。
+
+### 理由
+
+- **方案 1 的改动面与它解决的问题不成比例。** 迁移脚本一进包，`mypy files = ["aer"]`
+  与 `ruff check .` 就新覆盖 revision 文件；`Dockerfile` 的 COPY、ci.yml 的
+  `/app/migrations/versions` 检查、`.dockerignore` 注释、`deploy/compose.yaml` 的示例、
+  `agent.md` §8、README 结构树、`tests/infra/test_deployment_assets.py` 的三处路径断言
+  都要跟着改——十几处改动，只为换一个目录位置。
+- **方案 2 保持了"仓库根是唯一真源"。** 复制发生在构建期，`migrations/versions/`
+  在版本控制里只有一份，没有任何一条 revision 会在构建时被生成或改写。
+  `Dockerfile`、CI、部署脚本、测试断言、迁移历史**全部零改动**。
+- **方案 3 与项目铁律冲突。** "Schema 由 Alembic 管理、`aer/` 中不得出现 `create_all`"
+  是有验收脚本用 AST 检查的规则。用 `create_all` 兜底等于让同一份 schema 有两条产生
+  路径，而两条路径迟早会不一致。
+- **方案 4 让"受支持路径"名不副实。** 一个装完就跑不起来的包，不如不发布。
+- **回退顺序是"仓库优先"而不是"包内优先"。** 源码检出与 editable 安装下，
+  包内那份可能是一次旧构建的产物；先找仓库根，开发者永远迁移自己正在看的 revision。
+  包内回退只在"没有仓库根可找"时生效，也就是它本来要解决的那种安装。
+
+### 与 D-040 的关系
+
+D-040 的**结论**被这条决策取代（editable 不再是迁移能工作的前提），但它记录的实验
+仍然是有效的——正是那段实验引出了这个问题。镜像**仍保持 editable 安装**，
+理由从"正确性"变成"`/app` 必须是一棵可读的源码树"：`/app/scripts` 下的入口点按文件执行，
+排障时要能读到镜像里真正在跑的代码。
+
+`alembic.ini` 与 `migrations/` **仍然 COPY 进镜像**：镜像要跑 Alembic CLI 操作生产库，
+而 CLI 从工作目录读 `alembic.ini`，留在 `/app` 才能让
+`docker compose run --rm aer-runtime alembic upgrade head` 不加 `-c` 就能用。
+
+### 验证方式（不可省）
+
+这条决策的正确性**只能由制品验证**，本机源码树验证不了（源码树里包内那份根本不存在）：
+
+```bash
+python -m build
+python -m pip install --no-deps --target /tmp/aer-wheel dist/*.whl
+PYTHONPATH=/tmp/aer-wheel python -c "from aer import AER; AER('/tmp/aer-wheel-data').close()"
+```
+
+并且必须**先摘掉 `sys.meta_path` 里的 `_EditableFinder`**：本机同时装着 editable 版本时，
+`import aer` 会静默回落到源码树，那样验证的是工作区而不是制品。CI 的 `publish.yml`
+在发布前用干净 venv 重跑同一件事。
+
+### 重新评估触发条件
+
+- 迁移脚本需要独立的生命周期（例如用户要能自己加 revision，而不只是应用它们）时；
+- setuptools 提供声明式的方式把包外目录收进 wheel 时（现在的 `build_py` 子类可以删掉）；
+- 构建后端从 setuptools 换掉时。
+
+---
+
 ## 模板（后续决策请复制此结构）
 
 ```text

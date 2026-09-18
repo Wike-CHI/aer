@@ -18,6 +18,40 @@ Task → Agent Execution → Hook Capture → Trajectory → Verification
 
 第一阶段重点是 **Experience Retrieval**，而不是 **Model Training**。
 
+[![deploy](https://github.com/Wike-CHI/aer/actions/workflows/deploy.yml/badge.svg)](https://github.com/Wike-CHI/aer/actions/workflows/deploy.yml)
+[![python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![ruff](https://img.shields.io/badge/code%20style-ruff-000000)](https://github.com/astral-sh/ruff)
+
+> 流水线徽章指向 `deploy.yml`：`ci.yml` 只在 PR 上运行，而 `deploy.yml` 在 `main`
+> 上重跑同一套质量门禁，所以它是"当前主线是否绿"的那个信号。
+
+---
+
+## 安装
+
+要求 **Python >= 3.12**。
+
+从源码（当前推荐；见下方说明）：
+
+```bash
+git clone https://github.com/Wike-CHI/aer.git
+cd aer
+python -m venv .venv && . .venv/bin/activate     # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"
+```
+
+发行版（`pip install aer-runtime`）通道已经配置好：PyPI 用 Trusted Publishing，
+由 GitHub Release 触发 [`.github/workflows/publish.yml`](.github/workflows/publish.yml)。
+**在 `v0.6.0` 的 release 真正发布到 PyPI 之前，请不要把下面这行当成已经可用**：
+
+```bash
+pip install aer-runtime    # 仅在首次 release 成功发布到 PyPI 之后成立
+```
+
+开发依赖：pydantic 2.x、SQLAlchemy 2.x、Alembic 1.13+、NeuG 0.2.0；
+`[dev]` 额外带 pytest / ruff / mypy / pyyaml。
+
 ---
 
 ## 当前状态
@@ -286,11 +320,14 @@ scripts/                      # 运维入口点（按文件执行，不是可导
 
 .github/workflows/
 ├── ci.yml                    # PR：质量门禁 + 全新库迁移 + 镜像构建 + 容器冒烟
-└── deploy.yml                # main：重跑门禁 → 推送 sha 镜像 → SSH 部署
+├── deploy.yml                # main：重跑门禁 → 推送 sha 镜像 → SSH 部署
+└── publish.yml               # GitHub Release → 构建并发布到 PyPI（Trusted Publishing / OIDC）
 
 Dockerfile / .dockerignore    # 运行镜像；数据绝不进镜像
+setup.py / MANIFEST.in        # 打包 shim：构建期把 alembic.ini + migrations/ 复制进 wheel（D-064）
+LICENSE / CONTRIBUTING.md / SECURITY.md
 
-migrations/versions/
+migrations/versions/          # 唯一真源；wheel 内的 aer/_migrations/ 由 setup.py 在构建期复制
 ├── 0001_baseline_runs_and_events.py
 ├── 0002_errors_and_recoveries.py
 ├── 0003_verifications.py
@@ -346,6 +383,20 @@ AER_DB_PATH=/tmp/other.db alembic upgrade head
 
 # 查看当前版本
 alembic current
+```
+
+`alembic` 默认在当前目录找 `alembic.ini`，所以上面这些命令面向**源码检出**与
+**镜像内**（`/app` 下 `alembic.ini`、`migrations/`、`aer/` 三件套齐全）。
+
+从 wheel 安装的包没有仓库根目录：迁移脚本在包内 `aer/_migrations/`（构建期由
+`setup.py` 复制，见 `docs/DECISIONS.md` D-064）。两种等价写法：
+
+```bash
+# 1) 直接用包内配置
+alembic -c "$(python -c 'import aer,pathlib; print(pathlib.Path(aer.__file__).parent/"_migrations/alembic.ini")')" upgrade head
+
+# 2) 不用 CLI：AER(...) 在构造时就会把库迁移到 head
+python -c "from aer import AER; AER('./data').close()"
 ```
 
 规则：
@@ -496,3 +547,26 @@ docker compose -f compose.yaml run --rm aer-runtime python /app/scripts/smoke_te
 
 完整开发边界与优先级见 [`agent.md`](agent.md) 与 [`docs/TASKS.md`](docs/TASKS.md)，
 架构决策记录见 [`docs/DECISIONS.md`](docs/DECISIONS.md)（D-029 起为本轮新增）。
+
+---
+
+## 许可证
+
+Apache License 2.0 —— 全文见 [`LICENSE`](LICENSE)。
+
+## 贡献
+
+见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。里面最硬的一条：**已发布的 Alembic revision
+不允许改写**——schema 变更必须新增 revision，并且必须让历史数据库仍然能升到 head。
+
+## 安全
+
+见 [`SECURITY.md`](SECURITY.md)。
+
+**请不要用公开 issue 报告漏洞。** 首选 GitHub 的 Private Vulnerability Reporting；
+该功能在本仓库**尚未开启**，需要管理员在 Settings → Security 中打开。在它开启之前，
+请用 `SECURITY.md` 里的降级流程：issue 里只问私密渠道，不带任何细节。
+
+也请读一下那里写明的**设计限制**——尤其是这一条：**Sanitizer 尚未完整实现**，
+调用方传入的结构化 payload（tool input/output、event payload、verification message）
+是**原样落库**的。不要依赖 AER 替你过滤凭据或个人信息。

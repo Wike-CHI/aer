@@ -11,7 +11,7 @@ with ``aer/``. A **wheel** has no repository root: the package lands in
 ``site-packages`` and the repository is gone, so the scripts have to travel
 *inside* the package or an ordinary ``pip install aer-runtime`` produces a
 library that cannot open a database at all. That failure was measured, not
-assumed -- see ``docs/DECISIONS.md`` D-040 and D-054.
+assumed -- see ``docs/DECISIONS.md`` D-040 and D-064.
 
 So at build time the repository's own ``alembic.ini`` and ``migrations/`` are
 copied into ``aer/_migrations/``, *mirroring the repository layout* underneath it::
@@ -68,12 +68,25 @@ class build_py(_build_py):
         super().run()
 
     def _bundle_migrations(self) -> None:
-        """Copy ``alembic.ini`` and ``migrations/`` into ``build_lib/aer/_migrations``.
+        """Stage ``alembic.ini`` and ``migrations/`` under ``build_lib/aer/_migrations``.
 
-        Runs before ``super().run()`` so the declared ``package-data`` patterns
-        find the files already staged and record them as build outputs -- a
-        file that is only copied afterwards would ship but would be invisible to
-        anything that asks ``build_py`` what it produced.
+        Three things about this are load-bearing, and the first two are the reason it
+        is written this way rather than with a declarative ``package-data`` entry:
+
+        * **Nothing is written into the source tree.** Staging into ``build_lib`` is
+          what keeps the repository the single source of truth, so a checkout and an
+          editable install keep using the checked-in revisions -- which is also why
+          ``_repository_root()`` prefers them at runtime.
+        * **A ``package-data`` pattern cannot do this job.** Such a pattern resolves
+          relative to the *source* package directory, where ``_migrations`` does not
+          exist and must not exist. A copy sitting next to the package would be a
+          second revision history, and second copies go stale silently.
+        * **The ordering matters.** Staging before ``super().run()`` means the files
+          are in place before anything asks ``build_py`` what it built. What actually
+          carries them into the wheel is ``bdist_wheel`` installing the whole
+          ``build_lib`` tree; that is a property of the build backend, so it is
+          verified end to end (``publish.yml`` installs the built wheel in a clean
+          virtual environment and opens a store with it) rather than assumed.
         """
         destination = Path(self.build_lib) / PACKAGE_MIGRATIONS
 

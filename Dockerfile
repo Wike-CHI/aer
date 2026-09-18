@@ -6,19 +6,23 @@
 # long-running process to supervise, so the image deliberately has no daemon to
 # start and its default command exits.
 #
-# Layout note (this is load-bearing, see docs/DECISIONS.md D-040):
-#   aer.storage.migrations locates the migration scripts by walking **up** from
-#   the installed package until it finds `alembic.ini`. A regular (non-editable)
-#   install therefore cannot migrate anything, because the package lands in
-#   site-packages and `alembic.ini` is nowhere above it. Verified by experiment,
-#   not assumed:
+# Layout note (see docs/DECISIONS.md D-040 and D-064):
+#   aer.storage.migrations looks for `alembic.ini` and `migrations/` in two places:
+#   the package's own `aer/_migrations/`, staged into every wheel at build time,
+#   and -- checked first -- any ancestor of the installed package, which is where a
+#   source checkout or an editable install keeps them.
+#
+#   D-040 originally documented the second half only, and had to conclude that a
+#   regular install could not migrate at all, because the package lands in
+#   site-packages and `alembic.ini` is nowhere above it. Measured, not assumed:
 #       $ cp -r aer /tmp/fake-site-packages/ && PYTHONPATH=/tmp/fake-site-packages python -c ...
 #       StorageError: Cannot locate alembic.ini: AER's migration scripts are missing
-#   So the package is installed **editable** and `/app` holds exactly one copy of
-#   the source, sitting at the same level as `alembic.ini` and `migrations/`.
-#   That is also why there is no builder stage: every dependency ships a
-#   manylinux wheel, nothing is compiled, and a second stage would copy the same
-#   `/app` tree twice for no gain.
+#   D-064 removed that constraint by bundling the scripts, so this image is no
+#   longer pinned to an editable install for *correctness*; it stays editable
+#   because `/app` is meant to be a readable source tree -- see the install step.
+#
+#   No builder stage either: every dependency ships a manylinux wheel, nothing is
+#   compiled, and a second stage would copy the same `/app` tree twice for no gain.
 
 FROM python:3.12-slim AS runtime
 
@@ -77,17 +81,31 @@ WORKDIR /app
 RUN groupadd --gid 10001 aer \
  && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin aer
 
-# Only what the runtime needs: the package, the migration scripts, alembic.ini
-# (found by walking up from the package -- see the layout note above) and the ops
-# scripts, which run *inside* this image so the production host needs no Python
-# of its own. `deploy/` and `tests/` are host/CI concerns and are excluded.
-COPY pyproject.toml README.md alembic.ini ./
+# Only what the runtime needs: the package, the migration scripts, alembic.ini and
+# the ops scripts, which run *inside* this image so the production host needs no
+# Python of its own. `deploy/` and `tests/` are host/CI concerns and are excluded.
+#
+# `alembic.ini` and `migrations/` are still copied even though the package can now
+# carry them (`aer/_migrations`, see docs/DECISIONS.md D-064): this image runs the
+# *Alembic CLI* against the production database, and the CLI reads `alembic.ini`
+# from the working directory. Keeping them at `/app` is what makes
+# `docker compose run --rm aer-runtime alembic upgrade head` work unqualified.
+#
+# `LICENSE` is here because `project.license-files` in pyproject.toml names it:
+# an editable install still builds the distribution metadata, and the metadata
+# cannot reference a file that was left out of the build context.
+COPY pyproject.toml README.md LICENSE alembic.ini ./
 COPY aer/ ./aer/
 COPY migrations/ ./migrations/
 COPY scripts/ ./scripts/
 
-# Editable install: the only install mode under which migrations can be located
-# (see the layout note above). No `[dev]` extra -- ruff/mypy/pytest must not ship.
+# Editable install, and no `[dev]` extra -- ruff/mypy/pytest must not ship.
+#
+# Editable is no longer *required* for migrations to be found (that was D-040, and
+# D-064 removed the constraint); it is kept because `/app` is deliberately a
+# readable source tree: the shell entry points under `/app/scripts` are executed as
+# files, and an operator debugging a failed deployment can read exactly the code
+# the image is running.
 RUN python -m pip install --no-cache-dir --editable . \
  && python -m pip freeze --exclude-editable > /app/requirements.frozen.txt
 

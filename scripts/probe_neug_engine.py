@@ -289,6 +289,15 @@ def _run(neug, database_path: str, results: Results, *, raw_url: str) -> None:  
         " WITH (tokenizer = 'jieba', jieba_mode = 'mix')"
     )
     results.check("CREATE INDEX ... USING FTS with the jieba tokenizer", True)
+    # `ensure_schema` runs on every open, so the statement must be repeatable.
+    # Relying on an explicit "does it exist" probe instead cost a real engine error
+    # in the log of every healthy start.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS experience_fts ON Experience USING FTS (title, problem,"
+        " root_cause, solution, failed_attempts_text, avoid_text)"
+        " WITH (tokenizer = 'jieba', jieba_mode = 'mix')"
+    )
+    results.check("CREATE INDEX IF NOT EXISTS is repeatable", True)
 
     def score(query: str) -> list:
         statement = (

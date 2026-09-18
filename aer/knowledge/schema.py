@@ -140,8 +140,11 @@ def fts_index_statement(environ: Mapping[str, str] | None = None) -> str:
     if dictionary:
         options.append(f"jieba_dict = {_quote(dictionary)}")
     columns = ", ".join(EXPERIENCE_INDEXED_PROPERTIES)
+    # `IF NOT EXISTS` because `ensure_schema` runs on every open: without it the
+    # second open would either raise or need a probe query, and the probe the first
+    # version used wrote a real engine error into the log of a healthy system.
     return (
-        f"CREATE INDEX {FTS_INDEX_NAME} ON Experience USING FTS ({columns}) "
+        f"CREATE INDEX IF NOT EXISTS {FTS_INDEX_NAME} ON Experience USING FTS ({columns}) "
         f"WITH ({', '.join(options)})"
     )
 

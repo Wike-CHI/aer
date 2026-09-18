@@ -244,35 +244,24 @@ class NeuGKnowledgeIndex:
                 "assumed. Run a rebuild."
             )
 
-        connection = self._connect()
+        self._connect()
         for statement in SCHEMA_STATEMENTS:
             self._execute(statement)
-        # The index is created separately: a failure here must not be confused with
-        # a missing schema, and CREATE INDEX on an existing index is an error rather
-        # than a no-op, so its absence is checked first.
-        if not self._has_fts_index(connection):
-            try:
-                self._execute(fts_index_statement(self._environ))
-            except ProjectionError as exc:
-                logger.warning("Creating the FTS index at %s failed: %s", self._path, exc)
-        self._write_metadata()
-
-    def _has_fts_index(self, connection: Any) -> bool:
-        """Whether the full-text index already exists.
-
-        Asked by trying the cheapest possible full-text query rather than by
-        introspecting the catalogue: the catalogue surface is not part of what the
-        probe verified, and a spurious "does not exist" would recreate the index on
-        every open.
-        """
+        # `IF NOT EXISTS` is documented for CREATE INDEX and is what makes a second
+        # open a no-op. The first version probed for the index by running a
+        # deliberately failing full-text query instead, which worked but wrote an
+        # engine error into the log on every open -- a real error, in the log, on a
+        # healthy system, is worse than a slightly less direct check.
+        #
+        # Settings cannot be changed in place (the engine says so explicitly), so an
+        # existing index keeps the tokenizer it was built with. That is consistent
+        # with the versioning model: a settings change is a version bump, and a
+        # version bump is a rebuild.
         try:
-            connection.execute(
-                f"MATCH (e:Experience) RETURN {_BM25} AS score ORDER BY score ASC LIMIT 1",
-                parameters={"query": '"aer"'},
-            )
-            return True
-        except Exception:
-            return False
+            self._execute(fts_index_statement(self._environ))
+        except ProjectionError as exc:
+            logger.warning("Creating the FTS index at %s failed: %s", self._path, exc)
+        self._write_metadata()
 
     def _has_experiences(self) -> bool:
         """Whether any experience node exists, tolerating a database with no schema."""
@@ -513,7 +502,14 @@ class NeuGKnowledgeIndex:
         return [_to_match(row) for row in rows]
 
     def source_counts(self, experience_ids: tuple[str, ...]) -> dict[str, int]:
-        """Distinct supporting runs per experience, in one batched query."""
+        """Distinct supporting runs per experience, in one batched query.
+
+        Every requested id gets an entry, defaulting to zero. An experience with no
+        edges simply does not come back from a relationship match, and returning a
+        sparse map would make "no sources recorded" indistinguishable from "you did
+        not ask me about that one" -- a distinction the formatter's evidence line
+        depends on.
+        """
         if not experience_ids:
             return {}
         rows = self._execute(
@@ -521,7 +517,8 @@ class NeuGKnowledgeIndex:
             " RETURN e.id, count(r)",
             {"ids": list(experience_ids)},
         )
-        return {str(row[0]): int(row[1]) for row in rows}
+        counts = {str(row[0]): int(row[1]) for row in rows}
+        return {experience_id: counts.get(experience_id, 0) for experience_id in experience_ids}
 
     def fingerprints(self) -> dict[str, str]:
         """Map of experience id to the ``updated_at`` the index holds.
@@ -572,14 +569,22 @@ def _where_clause(filters: IndexFilters) -> tuple[str, dict[str, Any]]:
 
 
 def _to_match(row: Sequence[Any]) -> IndexMatch:
-    """Decode one result row using the column order the query asked for."""
+    """Decode one result row: the selected properties, then the score.
+
+    The trailing score column is sliced off before the properties are paired with
+    their names, and both steps are guarded. The first version of this function
+    checked the length and then paired all fifteen values with fourteen names
+    anyway, which ``zip(strict=True)`` turned into a ``ValueError`` on every search
+    -- invisible locally, where there is no engine to produce the row.
+    """
     values = list(row)
-    if len(values) != len(_MATCH_COLUMNS) + 1:
+    expected = len(_MATCH_COLUMNS) + 1
+    if len(values) != expected:
         raise ProjectionError(
-            f"Knowledge search returned {len(values)} columns, expected "
-            f"{len(_MATCH_COLUMNS) + 1}. The engine's row shape changed."
+            f"Knowledge search returned {len(values)} columns, expected {expected}. "
+            "The engine's row shape changed."
         )
-    fields = dict(zip(_MATCH_COLUMNS, values, strict=True))
+    fields = dict(zip(_MATCH_COLUMNS, values[:-1], strict=True))
     score = values[-1]
     return IndexMatch(
         experience_id=str(fields["id"]),

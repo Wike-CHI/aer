@@ -74,8 +74,9 @@ logger = logging.getLogger(__name__)
 
 _DEPRECATED = ExperienceStatus.DEPRECATED.value
 
-#: The node label the catalogue check looks for.
-_EXPERIENCE_LABEL = "Experience"
+#: Substring of the engine's "it is already there" message, matched case-insensitively.
+#: Observed verbatim as ``Index already exists: experience_fts``, error code 1013.
+_INDEX_EXISTS_MARKER = "already exists"
 
 #: Properties every search returns, in the order the decoder expects them.
 _MATCH_COLUMNS: tuple[str, ...] = (
@@ -226,26 +227,34 @@ class NeuGKnowledgeIndex:
     def ensure_schema(self) -> None:
         """Bring the projection schema up to V1, or refuse an index we cannot read.
 
-        Repeatable, and silent on the steady-state path. The first version of this
-        method had two flaws that the CI gate caught on a real engine:
+        Repeatable, silent on the healthy path, and -- the part that matters -- it
+        **cannot return an index that does not work**. Three attempts at this method
+        taught that lesson the expensive way, each time on a real engine:
 
-        * it relied on ``CREATE INDEX IF NOT EXISTS`` -- which the engine's *grammar*
-          rejects outright (``Parser exception: Invalid input <NOT>``) despite the
-          documentation listing the clause. Only running it showed that.
-        * worse, it swallowed the resulting failure and carried on, so the index
-          simply did not exist and every later search failed with a message about a
-          missing index rather than about the thing that went wrong.
+        1. it probed for the index by running a query it knew would fail, which put a
+           genuine engine error in the log of every healthy start;
+        2. it relied on ``CREATE INDEX IF NOT EXISTS`` -- a clause the engine's FTS
+           *documentation* shows and its *grammar* rejects (``Invalid input <NOT>``);
+        3. it swallowed the resulting failure, so the index silently never existed and
+           every later search reported "FTS index not found" -- the symptom, never the
+           cause.
 
-        The shape below fixes both. Existence is established by asking, never by
-        hoping: ``SHOW_NODE_TABLES()`` says whether the schema is there, a cheap
-        full-text query says whether the index is there, and if the index cannot be
-        established the method **raises** rather than returning an index that cannot
-        answer a question.
+        Asking the catalogue, which replaced those, turns out to be impossible as
+        well: ``SHOW_NODE_TABLES()`` is documented and not implemented (``function
+        SHOW_NODE_TABLES does not exist``). So existence is established by the only
+        question that cannot lie -- *can it answer a query* -- and the answer decides
+        what happens next:
+
+        * version recorded and the index answers: nothing is executed at all;
+        * otherwise the DDL runs (every statement is ``IF NOT EXISTS``), the index is
+          created (tolerating "already exists", which is a success), and the result is
+          probed again;
+        * if it still cannot answer, this raises rather than returning.
 
         Raises:
             KnowledgeSchemaError: the recorded version is not this build's, or is
                 unknown while the database already holds experiences.
-            ProjectionError: the full-text index could not be created or used.
+            ProjectionError: the full-text index could not be established.
         """
         recorded = self.projection_version()
         if recorded is not None and recorded != PROJECTION_SCHEMA_VERSION:
@@ -257,73 +266,64 @@ class NeuGKnowledgeIndex:
             )
 
         self._connect()
-        schema_present = self._schema_present()
-        if recorded is None and schema_present and self._has_experiences():
+        ready = self._full_text_ready()
+        if recorded == PROJECTION_SCHEMA_VERSION and ready:
+            # The steady state: one cheap query, nothing executed, nothing written to
+            # the engine's log. The readiness probe is silent when the index is there.
+            self._write_metadata()
+            return
+
+        if ready and recorded is None and self._experience_count() > 0:
             raise KnowledgeSchemaError(
                 f"The knowledge index at {self._path!r} holds experiences but has no "
                 "projection metadata, so the layout it was written with cannot be "
                 "assumed. Run a rebuild."
             )
 
-        if not schema_present:
-            # Nothing exists yet, so the DDL is genuinely created rather than
-            # re-asserted -- no "already exists" noise on the engine's log.
+        if not ready:
+            # Every statement is `IF NOT EXISTS`, so running all of them is safe
+            # whichever already exist. The engine logs "already exists" at error level
+            # for the ones that do, which is why this branch is only taken when the
+            # index cannot answer -- that is, when something really is missing.
             for statement in SCHEMA_STATEMENTS:
                 self._execute(statement)
-            self._create_fts_index(known_absent=True)
-        elif not self._full_text_ready():
-            self._create_fts_index(known_absent=False)
-
+            self._create_fts_index()
+            ready = self._full_text_ready()
+            if not ready:
+                raise ProjectionError(
+                    f"The full-text index at {self._path!r} is not usable after being "
+                    "created, so retrieval would fail on every query. The knowledge "
+                    "database is rebuildable from SQLite: run a rebuild."
+                )
         self._write_metadata()
 
-    def _create_fts_index(self, *, known_absent: bool) -> None:
-        """Create the full-text index and **prove** it answers a query.
+    def _create_fts_index(self) -> None:
+        """Create the full-text index, treating "already exists" as success.
 
-        The proof is the point. The version of this method that trusted a
-        documented-but-absent ``IF NOT EXISTS`` clause swallowed its own failure and
-        returned, leaving an index that could not answer anything -- every later
-        search then failed with a message about a missing index rather than about the
-        statement that had actually gone wrong. A schema method must not be able to
-        return an unusable object.
-
-        ``known_absent`` only decides how a failure is worded: when the schema was
-        just created there is nothing to be tolerant of, whereas on an existing
-        schema a failure means the index really was missing and is worth naming.
+        The tolerance is deliberately generous, and deliberately *not* the safety net.
+        Matching the engine's wording is fragile -- the observed message is ``Index
+        already exists: experience_fts`` with error code 1013 -- but a mis-match here
+        costs at worst an unnecessary rebuild, because the caller probes the index
+        afterwards and raises if it does not answer. The probe is the guarantee; this
+        only avoids reporting a healthy state as a failure.
         """
         try:
             self._execute(fts_index_statement(self._environ))
         except ProjectionError as exc:
-            if known_absent:
-                raise
+            if _INDEX_EXISTS_MARKER in str(exc).lower():
+                logger.debug("the full-text index at %s already exists", self._path)
+                return
             raise ProjectionError(
                 f"Creating the full-text index at {self._path!r} failed: {exc}"
             ) from exc
 
-        if not self._full_text_ready():
-            raise ProjectionError(
-                f"The full-text index at {self._path!r} is not usable after being "
-                "created, so retrieval would fail on every query. The knowledge "
-                "database can be rebuilt from SQLite."
-            )
-
-    def _schema_present(self) -> bool:
-        """Whether the projection's node tables exist, asked of the catalogue.
-
-        Deliberately not "did a query fail": a failed query writes an engine error
-        into the log, and a healthy start should produce no errors.
-        """
-        try:
-            rows = list(self._connect().execute("CALL SHOW_NODE_TABLES() RETURN *"))
-        except Exception:
-            return False
-        return any(str(row[0]) == _EXPERIENCE_LABEL for row in rows)
-
     def _full_text_ready(self) -> bool:
-        """Whether a full-text query can run, without logging a failure when it can.
+        """Whether a full-text query can run.
 
-        A cheap query against the real index: it succeeds silently when the index is
-        there, and raises (which the engine logs) only in the case that is about to
-        be repaired.
+        The only existence question this engine actually answers, and it answers it
+        silently when the answer is yes: a query against a working index produces no
+        log output, whereas a failed query produces an engine error. That asymmetry is
+        why readiness -- not introspection -- is the basis of :meth:`ensure_schema`.
         """
         try:
             self._connect().execute(
@@ -334,13 +334,18 @@ class NeuGKnowledgeIndex:
             return False
         return True
 
-    def _has_experiences(self) -> bool:
-        """Whether any experience node exists, tolerating a database with no schema."""
+    def _experience_count(self) -> int:
+        """How many experiences the index holds.
+
+        Only called once the index has answered a query, so the table is known to
+        exist; a failure here means "nothing to lose" rather than an error worth
+        reporting.
+        """
         try:
-            rows = list(self._execute("MATCH (e:Experience) RETURN count(e)").__iter__())
-        except ProjectionError:
-            return False
-        return bool(rows) and int(rows[0][0]) > 0
+            rows = list(self._connect().execute("MATCH (e:Experience) RETURN count(e)"))
+        except Exception:
+            return 0
+        return int(rows[0][0]) if rows else 0
 
     def _write_metadata(self) -> None:
         payload = {

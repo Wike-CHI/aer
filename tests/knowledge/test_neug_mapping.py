@@ -249,21 +249,25 @@ class TestEngineAvailability:
 class TestEnsureSchemaControlFlow:
     """The ordering of `ensure_schema`, tested without an engine.
 
-    Both defects the CI gate found in this method were sequencing mistakes rather
-    than engine mistakes: a clause that does not exist, and a swallowed failure that
-    let the method return an index it had never built. Neither needed a real engine
-    to catch -- only a test that watched which calls were made. These are those
-    tests, and they exist so the next such mistake is caught locally.
+    Three consecutive CI failures came out of this method, and two of them were
+    sequencing mistakes rather than engine mistakes: a documented clause the parser
+    rejects, and a swallowed failure that let the method return an index it had never
+    built. Neither needed an engine to catch -- only a test that watched which calls
+    were made. These are those tests.
     """
 
     @staticmethod
     def make_index(
-        tmp_path: Path, *, schema_present: bool, ready: list[bool]
+        tmp_path: Path,
+        *,
+        recorded: int | None,
+        ready: list[bool],
+        experiences: int = 0,
     ) -> tuple[NeuGKnowledgeIndex, list[str], list[int]]:
         """An index whose engine-facing steps are replaced by recordings.
 
-        ``ready`` is consumed one entry per ``_full_text_ready()`` call, so a test
-        can spell out "not there, then there" the way the real sequence goes.
+        ``ready`` is consumed one entry per ``_full_text_ready()`` call, so a test can
+        spell out "not there, then there" the way the real sequence goes.
         """
         opened = NeuGKnowledgeIndex(tmp_path / "aer-knowledge")
         executed: list[str] = []
@@ -271,10 +275,9 @@ class TestEnsureSchemaControlFlow:
         queue = list(ready)
 
         replacements = {
-            "projection_version": lambda: 1,
+            "projection_version": lambda: recorded,
             "_connect": lambda: object(),
-            "_schema_present": lambda: schema_present,
-            "_has_experiences": lambda: False,
+            "_experience_count": lambda: experiences,
             "_execute": lambda statement, parameters=None: executed.append(statement),
             "_write_metadata": lambda: written.append(1),
             "_full_text_ready": lambda: queue.pop(0) if queue else False,
@@ -283,65 +286,91 @@ class TestEnsureSchemaControlFlow:
             setattr(opened, name, value)
         return opened, executed, written
 
-    def test_a_fresh_database_creates_the_schema_then_the_index(self, tmp_path: Path) -> None:
-        opened, executed, written = self.make_index(tmp_path, schema_present=False, ready=[True])
-        opened.ensure_schema()
+    def test_a_healthy_index_executes_nothing_at_all(self, tmp_path: Path) -> None:
+        """The steady-state path.
 
-        assert SCHEMA_STATEMENTS[0] in executed
-        assert len([statement for statement in executed if "CREATE INDEX" in statement]) == 1
-        assert written == [1]
-
-    def test_a_healthy_reopen_writes_nothing(self, tmp_path: Path) -> None:
-        """The steady-state path must not re-run DDL.
-
-        The engine logs an error for every object that already exists, and a healthy
-        start producing errors in the log is its own kind of failure.
+        The engine logs an error for every object that already exists, so re-asserting
+        the schema on every open would fill a healthy system's log with errors -- and a
+        real error among them would then be invisible.
         """
-        opened, executed, written = self.make_index(tmp_path, schema_present=True, ready=[True])
+        opened, executed, written = self.make_index(tmp_path, recorded=1, ready=[True])
         opened.ensure_schema()
 
         assert executed == []
         assert written == [1]
 
-    def test_a_missing_index_on_an_existing_schema_is_created(self, tmp_path: Path) -> None:
+    def test_a_damaged_index_is_repaired(self, tmp_path: Path) -> None:
+        """Recorded version but no working index: rebuild the schema and the index."""
+        opened, executed, written = self.make_index(tmp_path, recorded=1, ready=[False, True])
+        opened.ensure_schema()
+
+        assert SCHEMA_STATEMENTS[0] in executed
+        assert [s for s in executed if "CREATE INDEX" in s], executed
+        assert written == [1]
+
+    def test_an_unknown_index_with_no_experiences_is_adopted(self, tmp_path: Path) -> None:
+        """Nothing to lose: an empty graph written by an unknown build is just a graph."""
         opened, executed, written = self.make_index(
-            tmp_path, schema_present=True, ready=[False, True]
+            tmp_path, recorded=None, ready=[False, True], experiences=0
         )
         opened.ensure_schema()
 
-        assert [statement for statement in executed if "CREATE INDEX" in statement], executed
-        assert not [statement for statement in executed if "CREATE NODE TABLE" in statement]
+        assert SCHEMA_STATEMENTS[0] in executed
         assert written == [1]
 
-    def test_an_index_that_cannot_be_established_is_fatal(self, tmp_path: Path) -> None:
-        """The fix for the swallowing: never hand back an index that cannot answer."""
-        opened, _, written = self.make_index(tmp_path, schema_present=True, ready=[False, False])
+    def test_an_unversioned_populated_index_is_refused(self, tmp_path: Path) -> None:
+        """Nothing may be assumed about a graph whose layout is unknown."""
+        opened, _, written = self.make_index(tmp_path, recorded=None, ready=[True], experiences=3)
+        with pytest.raises(KnowledgeSchemaError, match="rebuild"):
+            opened.ensure_schema()
+        assert written == []
+
+    def test_an_index_that_still_cannot_answer_is_fatal(self, tmp_path: Path) -> None:
+        """The fix for the swallowing: never hand back what cannot answer a query."""
+        opened, _, written = self.make_index(tmp_path, recorded=1, ready=[False, False, False])
         with pytest.raises(ProjectionError, match="not usable"):
             opened.ensure_schema()
         assert written == []
 
-    def test_a_failed_index_creation_on_a_fresh_database_is_fatal(self, tmp_path: Path) -> None:
-        opened, _, written = self.make_index(tmp_path, schema_present=False, ready=[False])
+    def test_a_failed_index_creation_is_fatal(self, tmp_path: Path) -> None:
+        opened, _, written = self.make_index(tmp_path, recorded=1, ready=[False, False])
         opened._execute = _ExplodingExecute()  # type: ignore[method-assign]
         with pytest.raises(ProjectionError):
             opened.ensure_schema()
         assert written == []
 
     def test_a_recorded_version_that_is_not_ours_is_refused(self, tmp_path: Path) -> None:
-        opened, executed, written = self.make_index(tmp_path, schema_present=True, ready=[True])
-        opened.projection_version = lambda: 99  # type: ignore[method-assign]
+        opened, executed, written = self.make_index(tmp_path, recorded=99, ready=[True])
         with pytest.raises(KnowledgeSchemaError, match="rebuild"):
             opened.ensure_schema()
         assert executed == []
         assert written == []
 
-    def test_an_unversioned_populated_index_is_refused(self, tmp_path: Path) -> None:
-        opened, _, written = self.make_index(tmp_path, schema_present=True, ready=[True])
-        opened.projection_version = lambda: None  # type: ignore[method-assign]
-        opened._has_experiences = lambda: True  # type: ignore[method-assign]
-        with pytest.raises(KnowledgeSchemaError, match="rebuild"):
-            opened.ensure_schema()
-        assert written == []
+
+class TestFtsIndexCreation:
+    """The "already exists" tolerance, which is a success rather than a failure."""
+
+    def test_an_existing_index_is_not_reported_as_a_failure(self, tmp_path: Path) -> None:
+        """The engine says `Index already exists: experience_fts`, code 1013.
+
+        Treated as success so the repair path can be unconditional: it does not have to
+        know in advance which of the objects it is about to create are already there.
+        """
+        opened = NeuGKnowledgeIndex(tmp_path / "aer-knowledge")
+        opened._execute = _RaisingExecute(  # type: ignore[method-assign]
+            "Failed to execute query: CREATE INDEX ... Error code: 1013, Error Message: "
+            "ERR_ILLEGAL_OPERATION: Execution failed at operator: [CreateIndexOpr], "
+            "Index already exists: experience_fts"
+        )
+        opened._create_fts_index()
+
+    def test_any_other_failure_is_raised(self, tmp_path: Path) -> None:
+        opened = NeuGKnowledgeIndex(tmp_path / "aer-knowledge")
+        opened._execute = _RaisingExecute(  # type: ignore[method-assign]
+            "Error code: 3000, Error Message: Parser exception: Invalid input <NOT>"
+        )
+        with pytest.raises(ProjectionError, match="Creating the full-text index"):
+            opened._create_fts_index()
 
 
 class _ExplodingExecute:
@@ -349,3 +378,13 @@ class _ExplodingExecute:
 
     def __call__(self, statement: str, parameters: object = None) -> None:
         raise ProjectionError("the engine refused the statement")
+
+
+class _RaisingExecute:
+    """An ``_execute`` that raises with a fixed engine message."""
+
+    def __init__(self, message: str) -> None:
+        self._message = message
+
+    def __call__(self, statement: str, parameters: object = None) -> None:
+        raise ProjectionError(self._message)

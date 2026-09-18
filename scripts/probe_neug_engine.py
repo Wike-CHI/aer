@@ -35,6 +35,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from aer.knowledge.schema import fts_index_statement
+
 DDL = (
     "CREATE NODE TABLE IF NOT EXISTS Experience ("
     " id VARCHAR(128), kind VARCHAR(32), status VARCHAR(32), domain VARCHAR(128),"
@@ -163,22 +165,17 @@ def _run(neug, database_path: str, results: Results, *, raw_url: str) -> None:  
     results.check("the database path becomes a directory", Path(database_path).is_dir())
 
     print("\n## schema")
-    # `ensure_schema` decides whether to create the schema by asking the catalogue,
-    # so this procedure has to work and has to be usable on an empty database.
-    before_ddl = [str(row[0]) for row in connection.execute("CALL SHOW_NODE_TABLES() RETURN *")]
-    results.check(
-        "SHOW_NODE_TABLES() answers on a database with no schema",
-        "Experience" not in before_ddl,
-        str(sorted(before_ddl)),
+    # The documented schema-introspection procedures are how `ensure_schema` would
+    # most naturally ask "does the schema exist". They are not implemented, which is
+    # why it asks a different question instead (`_full_text_ready`). Recording the
+    # absence here is the point: if a future version implements them, this is where
+    # the simpler design becomes available again.
+    results.raises(
+        "SHOW_NODE_TABLES() does not exist despite being documented",
+        lambda: connection.execute("CALL SHOW_NODE_TABLES() RETURN *"),
     )
     for statement in DDL:
         connection.execute(statement)
-    after_ddl = [str(row[0]) for row in connection.execute("CALL SHOW_NODE_TABLES() RETURN *")]
-    results.check(
-        "SHOW_NODE_TABLES() reports the labels the DDL created",
-        {"Experience", "RunRef", "Domain"} <= set(after_ddl),
-        str(sorted(after_ddl)),
-    )
     for statement in DDL:
         connection.execute(statement)
     results.check("schema DDL is repeatable", True)
@@ -314,6 +311,21 @@ def _run(neug, database_path: str, results: Results, *, raw_url: str) -> None:  
             " WITH (tokenizer = 'jieba')"
         ),
     )
+    # `ensure_schema` therefore re-creates the index on the repair path and treats
+    # this specific failure as success. The message and code are asserted so that a
+    # reworded engine error shows up here rather than as a mysterious inability to
+    # open an index that is perfectly fine.
+    try:
+        connection.execute(fts_index_statement())
+    except Exception as exc:
+        message = str(exc)
+        results.check(
+            'a repeated CREATE INDEX says "already exists"',
+            "already exists" in message.lower(),
+            message[-120:],
+        )
+    else:
+        results.check("a repeated CREATE INDEX says already exists", False, "no exception raised")
 
     def score(query: str) -> list:
         statement = (

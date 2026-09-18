@@ -307,11 +307,17 @@ class TestDeleteAndReset:
         assert [match.experience_id for match in search(index, "after reset")] == ["exp-1"]
 
     def test_a_reset_clears_relations_too(self, index: NeuGKnowledgeIndex) -> None:
+        """Every requested id gets an entry, and after a reset they all read zero.
+
+        A sparse map would make "no sources recorded" indistinguishable from "you did
+        not ask me about that one", which the formatter's evidence line depends on.
+        """
         index.ensure_schema()
         ref = IndexedRunRef(id="run-1", status="SUCCESS", agent_name="wp", agent_version="1")
         index.upsert_experiences((indexed_experience(run_ids=("run-1",)),), (ref,))
+        assert index.source_counts(("exp-1",)) == {"exp-1": 1}
         index.reset()
-        assert index.source_counts(("exp-1",)) == {}
+        assert index.source_counts(("exp-1",)) == {"exp-1": 0}
 
 
 class TestPersistence:
@@ -357,12 +363,17 @@ class TestSearch:
             assert matches[0].experience_id == expected, (query, [m.experience_id for m in matches])
 
     def test_a_better_match_ranks_first(self, index: NeuGKnowledgeIndex) -> None:
-        """BM25 comes back negative and lower-is-better; the ranking must not care."""
+        """BM25 comes back negative and lower-is-better; the ranking must not care.
+
+        The comparison is ``<=`` rather than ``<`` on purpose: two documents that are
+        near-identical score identically, and asserting a strict ordering would make
+        this fail for a reason that has nothing to do with ranking.
+        """
         index.ensure_schema()
         seed(index)
         matches = search(index, "WordPress REST API 403")
         assert matches[0].experience_id == "exp-wp"
-        assert matches[0].bm25_score < matches[-1].bm25_score
+        assert matches[0].bm25_score <= matches[-1].bm25_score
 
     def test_the_domain_filter_excludes_other_domains(self, index: NeuGKnowledgeIndex) -> None:
         """The graph hop doing work a text index could not do."""
@@ -404,9 +415,17 @@ class TestSearch:
         )
 
     def test_the_limit_bounds_the_result(self, index: NeuGKnowledgeIndex) -> None:
+        """A promise of the index, not of the engine.
+
+        The engine ignores a parameterised ``LIMIT`` -- a query asking for 2 rows came
+        back with 5 -- so the bound is enforced in `search` itself, after the rows
+        arrive ordered by score. This test would have passed by accident before that
+        was true, because the corpus only had five documents.
+        """
         index.ensure_schema()
         seed(index)
         assert len(search(index, "WordPress 分类页 询盘 多维表格 wp json", limit=2)) <= 2
+        assert len(search(index, "WordPress 分类页 询盘 多维表格 wp json", limit=1)) <= 1
 
     def test_matches_carry_every_field_the_formatter_needs(self, index: NeuGKnowledgeIndex) -> None:
         index.ensure_schema()
@@ -458,5 +477,7 @@ class TestThroughput:
         started = time.perf_counter()
         matches = search(index, "WordPress REST API 403 多维表格", limit=3)
         query_elapsed = time.perf_counter() - started
+        # Exactly three, out of a thousand matches: this is the case that caught the
+        # ignored LIMIT, and it is the case a real knowledge store will be in.
         assert len(matches) == 3
         print(f"  top-3 over {total} experiences in {query_elapsed * 1000:.1f}ms")

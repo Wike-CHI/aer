@@ -556,10 +556,19 @@ class NeuGKnowledgeIndex:
             return []
         where, parameters = _where_clause(query.filters)
         parameters["query"] = expression
-        parameters["limit"] = max(1, int(query.limit))
+        # The bound is a **literal**, and the result is truncated below as well.
+        #
+        # Both, because the engine ignores a parameterised limit: a query asking for 2
+        # rows came back with 5, one asking for 3 came back with 15, and one asking for
+        # 3 against a thousand-row projection came back with 1000. The literal may or
+        # may not be pushed into the index scan -- that is a performance question --
+        # but the bound itself is a promise this class makes, so it is enforced here
+        # rather than hoped for there. The rows arrive ordered by score, so taking the
+        # first N of them is the right N.
+        limit = max(1, int(query.limit))
 
         columns = ", ".join(f"e.{name}" for name in _MATCH_COLUMNS)
-        projection = f"RETURN {columns}, {_BM25} AS score ORDER BY score ASC LIMIT $limit"
+        projection = f"RETURN {columns}, {_BM25} AS score ORDER BY score ASC LIMIT {limit}"
         if query.domain is None:
             match = "MATCH (e:Experience)"
         else:
@@ -575,7 +584,7 @@ class NeuGKnowledgeIndex:
             rows = list(connection.execute(statement, parameters=parameters))
         except RuntimeError as exc:
             raise ProjectionError(f"Knowledge search failed: {exc}") from exc
-        return [_to_match(row) for row in rows]
+        return [_to_match(row) for row in rows[:limit]]
 
     def source_counts(self, experience_ids: tuple[str, ...]) -> dict[str, int]:
         """Distinct supporting runs per experience, in one batched query.

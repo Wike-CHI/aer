@@ -276,7 +276,29 @@ def _run(neug, database_path: str, results: Results, *, raw_url: str) -> None:  
             parameters={"n": 2},
         )
     )
-    results.check("ORDER BY + LIMIT $n works", len(ordered) <= 2, f"{len(ordered)} rows")
+    # A parameterised LIMIT is **silently ignored**: with three rows in the table, a
+    # query asking for two returns three. `search` therefore inlines the bound as a
+    # literal *and* truncates, so the index's own contract holds whatever the engine
+    # decides to do. Recorded here because it is exactly the kind of silent difference
+    # that surfaces later as "why did retrieval return eleven experiences".
+    parameterised = list(
+        connection.execute(
+            "MATCH (e:Experience) RETURN e.id ORDER BY e.updated_at ASC LIMIT $n",
+            parameters={"n": 1},
+        )
+    )
+    results.check(
+        "ORDER BY + LIMIT $n is accepted",
+        bool(parameterised),
+        f"{len(parameterised)} rows for a limit of 1",
+    )
+    results.check(
+        "LIMIT $parameter is ignored (so the bound must be enforced by the caller)",
+        len(parameterised) > 1,
+        f"asked for 1 of {count_experiences(connection)} rows, got {len(parameterised)}",
+    )
+    literal = list(connection.execute("MATCH (e:Experience) RETURN e.id LIMIT 1"))
+    results.check("LIMIT as a literal is honoured", len(literal) == 1, f"{len(literal)} rows")
 
     print("\n## explicit transactions are the only atomicity unit")
     results.raises(

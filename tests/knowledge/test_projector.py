@@ -402,6 +402,25 @@ class TestStagingArtifactGuard:
     def test_a_missing_artifact_is_not_an_error(self, tmp_path: Path) -> None:
         _remove_index_artifacts(tmp_path / "aer-knowledge.previous")
 
+    def test_an_orphaned_sidecar_is_removed_even_without_its_directory(
+        self, tmp_path: Path
+    ) -> None:
+        """The exact state a completed swap leaves behind.
+
+        The staging *directory* is renamed into place, so only its sidecar survives --
+        and that sidecar carries a schema version identical in name to the live one.
+        This is the file the production acceptance run twice found in
+        ``/srv/aer/knowledge``.
+        """
+        staging = tmp_path / "aer-knowledge.rebuilding"
+        sidecar = Path(projection_metadata_path(str(staging)))
+        sidecar.write_text('{"projection_schema_version": 1}', encoding="utf-8")
+        assert not staging.exists()
+
+        _remove_index_artifacts(staging)
+
+        assert not sidecar.exists()
+
     def test_a_file_is_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "aer-knowledge.rebuilding"
         path.write_text("not a directory", encoding="utf-8")

@@ -291,7 +291,16 @@ class KnowledgeProjector:
             ) from exc
         finally:
             if swapped:
+                # Both, and `staging` is the one that matters. The staging directory
+                # was renamed into place, so what is left of it is its **sidecar**,
+                # named after the staging path -- `aer-knowledge.rebuilding
+                # .projection.json`. Removing only `previous` (which the first fix
+                # did) leaves that file behind in the knowledge directory with a
+                # stale schema version in it. Found by running the acceptance script
+                # on the real server, twice: the first run showed the leftover, the
+                # first fix removed the wrong one.
                 _remove_index_artifacts(previous)
+                _remove_index_artifacts(staging)
 
         duration_ms = (time.perf_counter() - started) * 1000
         report = RebuildReport(

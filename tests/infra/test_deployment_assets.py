@@ -266,11 +266,19 @@ class TestDockerfile:
         is meant to be a readable source tree: the entry points under `/app/scripts`
         are executed as files, and an operator debugging a failed deployment must be
         able to read the code the image is actually running.
+
+        The `knowledge` extra is asserted for the opposite reason: leaving it out
+        would produce an image that traces, verifies and distils but cannot search,
+        and the failure would appear as an ImportError on the first retrieval in
+        production rather than here (D-065 made `neug` optional, so a bare
+        `--editable .` no longer installs it).
         """
         installs = " ".join(instructions_named("RUN"))
 
-        assert "--editable ." in installs
-        assert "[dev]" not in installs
+        assert "--editable '.[knowledge]'" in installs
+        # No `[dev]`: ruff/mypy/pytest must not ship into a runtime image. Written
+        # as the extra *spec* so the assertion cannot be satisfied by a comment.
+        assert ".[dev" not in installs
         assert "ruff" not in installs and "mypy" not in installs and "pytest" not in installs
 
     def test_never_copies_the_whole_context(self) -> None:

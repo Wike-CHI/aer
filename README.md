@@ -32,25 +32,28 @@ Task → Agent Execution → Hook Capture → Trajectory → Verification
 
 要求 **Python >= 3.12**。
 
-从源码（当前推荐；见下方说明）：
+```bash
+pip install aer-runtime                 # 运行时 / 独立验证 / 经验提炼 / SQLite 存储
+pip install "aer-runtime[knowledge]"    # 再加上检索（NeuG 知识索引）
+```
+
+`neug` 是**可选依赖**，而不是把必需的东西藏进 extra：它在 PyPI 上只有 macOS(arm64) 与 Linux
+的 wheel，**没有 Windows 分发**，声明为必需会让 Windows 上整条 `pip install` 直接失败
+（`docs/DECISIONS.md` D-065）。没有它时 `import aer`、`AER()`、验证与提炼全部正常，
+只有引擎侧检索不可用——引擎在 `aer/knowledge/neug.py` 里是**惰性导入**的，
+测试也钉住了这一点。
+
+从源码（要改代码时）：
 
 ```bash
 git clone https://github.com/Wike-CHI/aer.git
 cd aer
 python -m venv .venv && . .venv/bin/activate     # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
+pip install -e ".[dev,knowledge]"                # Windows 上写 -e ".[dev]"
 ```
 
-发行版（`pip install aer-runtime`）通道已经配置好：PyPI 用 Trusted Publishing，
-由 GitHub Release 触发 [`.github/workflows/publish.yml`](.github/workflows/publish.yml)。
-**在 `v0.6.0` 的 release 真正发布到 PyPI 之前，请不要把下面这行当成已经可用**：
-
-```bash
-pip install aer-runtime    # 仅在首次 release 成功发布到 PyPI 之后成立
-```
-
-开发依赖：pydantic 2.x、SQLAlchemy 2.x、Alembic 1.13+、NeuG 0.2.0；
-`[dev]` 额外带 pytest / ruff / mypy / pyyaml。
+发行版由 GitHub Release 触发 [`.github/workflows/publish.yml`](.github/workflows/publish.yml)
+发布到 PyPI（Trusted Publishing，仓库里没有任何凭据）。
 
 ---
 
@@ -411,18 +414,21 @@ python -c "from aer import AER; AER('./data').close()"
 
 ## 开发
 
-依赖：Python 3.12+、pydantic 2.x、SQLAlchemy 2.x、Alembic 1.13+。
+运行时依赖：Python 3.12+、pydantic 2.x、SQLAlchemy 2.x、Alembic 1.13+。
 开发额外需要 pytest / ruff / mypy / pyyaml（最后一个用于实际解析 compose 与
 workflow 文件，而不是对它们做文本匹配）。
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev,knowledge]"   # Windows 上写 -e ".[dev]"（neug 无 Windows 分发）
 
 pytest
 ruff check .
 ruff format --check .
 mypy aer/
 ```
+
+`knowledge` extra 只在能装 `neug` 的平台上加。少了它，引擎相关的用例会被跳过而不是失败，
+所以**本机全绿不等于 CI 全绿**——CI 用的是 `.[dev,knowledge]`。
 
 基础设施部分的额外校验（有 Docker 时）：
 

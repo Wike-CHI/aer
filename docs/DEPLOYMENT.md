@@ -1193,3 +1193,21 @@ python -c "from aer import AER; AER('/tmp/aer-release-check').close()"   # 构�
 ```
 
 第三条是真正的验收：它能过，说明 wheel 里的包自带迁移脚本，`pip install` 是一条自足的路径。
+
+**再加一步，且在 Windows 上做**（v0.6.1 的教训）：**复核依赖能否解析**。
+CI 跑在 Linux 上，永远发现不了"某个依赖没有 Windows 分发"这类问题——
+
+```bash
+pip install --dry-run --ignore-installed aer-runtime
+```
+
+v0.6.0 就是栽在这里：`neug==0.2.0` 只有 macOS 与 Linux 的 wheel，而它是必需依赖，
+于是 Windows 上整条安装直接失败（`docs/DECISIONS.md` D-065）。发布后顺手跑一次这条命令，
+比等用户来报更便宜。
+
+如果之后要复查引擎本身的可用性：
+
+```bash
+pip install --upgrade "aer-runtime[knowledge]"
+python -c "import neug; print(neug.__file__)"
+```

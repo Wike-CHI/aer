@@ -152,7 +152,7 @@ from aer.verification.human import HumanVerifier
 from aer.verification.llm import LLMVerifier
 from aer.verification.summary import VerificationSummary, is_verified_success
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 __all__ = [
     "AER",

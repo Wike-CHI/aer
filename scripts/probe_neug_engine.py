@@ -270,12 +270,6 @@ def _run(neug, database_path: str, results: Results, *, raw_url: str) -> None:  
             "MATCH (e:Experience) RETURN e.id LIMIT $n", parameters={"n": 2}
         ),
     )
-    ordered = list(
-        connection.execute(
-            "MATCH (e:Experience) RETURN e.id ORDER BY e.updated_at ASC LIMIT $n",
-            parameters={"n": 2},
-        )
-    )
     # A parameterised LIMIT is **silently ignored**: with three rows in the table, a
     # query asking for two returns three. `search` therefore inlines the bound as a
     # literal *and* truncates, so the index's own contract holds whatever the engine

@@ -1020,6 +1020,73 @@ neuG 服务模式（db.serve()）         单机单进程下嵌入式更简单�
 检索时写 usage                     需要任务结果才能定义"有用"（D-060）
 ```
 
+## 19. M6 生产验收记录（2026-09-18）
+
+### 19.1 脚本
+
+```bash
+docker compose --file /srv/aer/deploy/compose.yaml run --rm \
+  aer-runtime python /app/scripts/drill_knowledge.py /tmp/knowledge-drill
+```
+
+`/tmp` 而不是别的目录：compose 只挂 `/data` `/artifacts` `/knowledge` `/backups`，
+在宿主某个自选目录上"准备好一个目录"对容器毫无意义（本轮在这上面错了两回）。
+
+### 19.2 结果
+
+```text
+镜像          ghcr.io/wike-chi/aer:sha-39948667d6e86f3bcadfa6b44e19e7fe80c6c50f
+知识库路径    /srv/aer/knowledge/aer-knowledge（容器内 /knowledge/aer-knowledge）
+投影版本      1
+store 经验数  0
+索引 经验数   0
+drift         none
+BM25 检索     空库返回空结果（不是错误），渲染为 "No relevant experience found."
+重启验证      第二个容器打开同一索引，状态与检索一致
+drill         17/17 通过
+```
+
+drill 用一个临时库跑完整链路：两条经验（一条验证过的 RECOVERY、一条 FAILURE）→
+投影 → 检索 → **删掉整个知识库** → 从 SQLite 重建 → 答案逐字段一致 → 再验证
+"store 为空"这一真实生产状态。耗时：首次重建 1.9–3.0 秒（含全文索引创建），
+重建一份已存在的索引约 0.6–1.9 秒。
+
+### 19.3 生产数据库未被改动
+
+```text
+sha256 : f1d72ef63dc824c8dc5629a6527... （演练前后一致）
+mtime  : 2026-09-16 02:15:39 -0700      （演练前后一致）
+目录   : /srv/aer/data 内只有 aer.db
+凭据   : /root/.docker/config.json 仍是 {"auths": {}}
+```
+
+### 19.4 本轮在生产验收里发现并修掉的问题
+
+三次 drill 运行、三次失败，每一次都是**本机看不见**的：
+
+1. **rebuild 残留暂存元数据**：swap 只改目录名，`aer-knowledge.rebuilding
+   .projection.json` 留在知识目录里。
+2. **修 1 的方式是错的**：事后删除暂存产物，删掉了本该**改名就位**的边车 →
+   重建后线上索引没有元数据 → 下一次打开被 `ensure_schema` 正确拒绝。
+   把 swap 抽成 `_swap_index_artifacts()` 并直接测它（5 条）。
+3. **验收脚本的路径不在挂载里**：宿主根目录下建的目录容器看不到；
+   同时 drill 的参数语义从"必须已存在"改为"能创建或可写"，并在不能时给出
+   可执行的提示。
+
+第 2 条值得单独记住：**"修好了"必须由目标环境确认**，因为修 1 的补丁在本机
+测试全绿。
+
+### 19.5 验收之后的线上状态
+
+```text
+/srv/aer/knowledge/
+├── aer-knowledge/                     NeuG 数据库（76K，空库）
+└── aer-knowledge.projection.json      {"projection_schema_version": 1, ...}
+```
+
+生产 store 为空，所以索引也为空——这是**合法状态**，不是失败。
+有数据的完整投影与检索由 drill 在临时库上验证（`§19.2`）。
+
 ## 17. 本轮明确不做的事
 
 不做，是因为当前只有一台服务器，也因为本轮的目的是"能可靠地构建、验证、发布、迁移、备份和回滚"，而不是堆基础设施：

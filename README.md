@@ -384,11 +384,7 @@ docker compose -f deploy/compose.yaml config    # 需要 deploy/.env
 > 提炼的 Provider 不配置时 `distill_run` 会大声报错；验证与提炼的流水线本身
 > 完全离线可测，测试套件不访问网络。
 
-本项目当前使用托管隔离环境：
 
-```text
-C:\Users\Administrator\.workbuddy\binaries\python\envs\default\Scripts\python.exe
-```
 
 ---
 

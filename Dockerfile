@@ -99,14 +99,21 @@ COPY aer/ ./aer/
 COPY migrations/ ./migrations/
 COPY scripts/ ./scripts/
 
-# Editable install, and no `[dev]` extra -- ruff/mypy/pytest must not ship.
+# Editable install, with the `knowledge` extra and without `[dev]` --
+# ruff/mypy/pytest must not ship, but the retrieval engine must.
+#
+# The extra is spelled out rather than left implicit because `neug` is an *optional*
+# dependency of the distribution (D-065): it publishes no Windows wheel, so it cannot
+# be required. A bare `--editable .` would therefore install a runtime that can
+# trace, verify and distil but cannot search -- and the failure would surface as an
+# ImportError on the first retrieval in production, not at build time.
 #
 # Editable is no longer *required* for migrations to be found (that was D-040, and
 # D-064 removed the constraint); it is kept because `/app` is deliberately a
 # readable source tree: the shell entry points under `/app/scripts` are executed as
 # files, and an operator debugging a failed deployment can read exactly the code
 # the image is running.
-RUN python -m pip install --no-cache-dir --editable . \
+RUN python -m pip install --no-cache-dir --editable '.[knowledge]' \
  && python -m pip freeze --exclude-editable > /app/requirements.frozen.txt
 
 # Fetch the NeuG full-text extension into the image, and verify it landed.

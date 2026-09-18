@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aer-runtime"
-version = "0.6.0"
+version = "0.6.1"
 description = "AER - Agent Experience Runtime (SQLite lightweight edition)"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -35,21 +35,37 @@ classifiers = [
 
 dependencies = [
     "alembic>=1.13",
-    # Pinned exactly, unlike every other dependency here, and for a concrete
-    # reason rather than caution: the knowledge layer is written against this
-    # engine's *observed* behaviour -- BM25 coming back negative, `execute()`
-    # refusing multiple statements, no MERGE, no edge de-duplication, a full-text
-    # query parsed as FTS5 syntax -- and against a schema whose CHECK constraints
-    # the extension download URL also embeds (`.../extensions/v0.2.0/...`). A minor
-    # bump has already rebuilt the whole index framework once (v0.2 introduced it),
-    # so a range here would mean shipping code that was verified against something
-    # else. docs/DECISIONS.md D-055 records when to revisit this.
-    "neug==0.2.0",
     "pydantic>=2.7",
     "sqlalchemy>=2.0",
 ]
 
 [project.optional-dependencies]
+# The NeuG-backed retrieval index (M6).
+#
+# This is an extra rather than a hard dependency, and the reason is measured rather
+# than stylistic: `neug` publishes wheels for macOS (arm64) and manylinux only --
+# no Windows wheel and no sdist -- so declaring it as required made
+# `pip install aer-runtime` fail outright on Windows, with
+# `No matching distribution found for neug==0.2.0`, even though everything else in
+# AER works there. The engine is imported lazily inside `aer/knowledge/neug.py`, so
+# the runtime, the verification engine, distillation and the SQLite store have no
+# need of it. docs/DECISIONS.md D-065 records the decision and what it costs.
+#
+# Pinned exactly, unlike every other dependency here, and for a concrete reason
+# rather than caution: the knowledge layer is written against this engine's
+# *observed* behaviour -- BM25 coming back negative, `execute()` refusing multiple
+# statements, no MERGE, no edge de-duplication, a full-text query parsed as FTS5
+# syntax -- and against a schema whose CHECK constraints the extension download URL
+# also embeds (`.../extensions/v0.2.0/...`). A minor bump has already rebuilt the
+# whole index framework once (v0.2 introduced it), so a range here would mean
+# shipping code that was verified against something else. docs/DECISIONS.md D-055
+# records when to revisit this.
+#
+# `dev` deliberately does not pull this in: the test suite has to be installable on
+# every platform. Contributors who want the engine tests (and CI, which runs them)
+# ask for `.[dev,knowledge]`.
+knowledge = ["neug==0.2.0"]
+
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",

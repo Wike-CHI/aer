@@ -2751,6 +2751,92 @@ PYTHONPATH=/tmp/aer-wheel python -c "from aer import AER; AER('/tmp/aer-wheel-da
 
 ---
 
+## D-065 `neug` 是可选 extra，不是必需依赖
+
+**时间**：2026-09-18
+**里程碑**：开源发布（v0.6.1）
+
+### 背景
+
+v0.6.0 发布到 PyPI 之后，在 Windows 上装它：
+
+```text
+$ pip install aer-runtime
+ERROR: Could not find a version that satisfies the requirement neug==0.2.0
+       (from aer-runtime) (from versions: none)
+ERROR: No matching distribution found for neug==0.2.0
+```
+
+`neug==0.2.0` 在 PyPI 上只有 **24 个 wheel，全部是 macOS(arm64) 与 manylinux
+(x86_64/aarch64)**——既没有 Windows wheel，也没有 sdist。而它在 `pyproject.toml` 里是
+**必需依赖**，于是整条 `pip install` 在 Windows 上直接失败。
+
+注意这不是制品问题：同一份 wheel 从 PyPI 装进隔离目录后 `import aer`、
+`AER(...)` 建库、迁移到 `0004`、写入 Run 全部正常。失败发生在**依赖解析**阶段，
+发生在 AER 自己的代码被碰到之前。
+
+### 问题
+
+`neug` 应该是必需依赖，还是可选？
+
+### 候选方案
+
+1. 保持必需，在文档里写明"Windows 不支持 pip 安装"。
+2. 环境标记：`neug==0.2.0; platform_system != 'Windows'`。
+3. 移进 `[project.optional-dependencies]` 的 `knowledge` extra。
+4. 去掉 `neug`，改用别的方式做检索——与本轮无关，重新评估 M6 的是另一件事。
+
+### 最终方案
+
+方案 3。
+
+### 理由
+
+- **`neug` 事实上就是可选的，这不是权宜之计。** 整个 `aer/` 包里它只有**一处引用**，
+  而且是**函数内**导入：`aer/knowledge/neug.py:701`。没有任何顶层 `import neug`。
+  实测把 `neug` 从环境里完全去掉，`import aer`、`AER()`、验证、提炼、备份冒烟全部正常——
+  只有引擎侧检索不可用。这正是 extra 该表达的关系。
+- **方案 1 等于承认"受支持路径"在 Windows 上不成立**，而 Windows 是主要的开发平台之一；
+  一个自己的维护者都装不上的包，谈不上"可以正式发布"。
+- **方案 2 最小，但语义不诚实。** `platform_system != 'Windows'` 把"这个平台没有分发"
+  写成"这个平台不需要"。下一个读到它的人会以为引擎在 Windows 上没必要装，
+  而事实是**装不上**。同时它让依赖图在不同平台不一致，`pip install` 的结果无法用一句话描述。
+- **extra 让两件事同时成立**：`pip install aer-runtime` 在任何平台都成功；
+  想要检索的人显式写 `aer-runtime[knowledge]`，拿不到时得到的是一个**明确的安装失败**，
+  而不是运行到一半的 ImportError。
+
+### 代价与必须同步的改动（这一条是重点）
+
+把依赖降级为 extra **不会自动降级生产镜像**：`Dockerfile` 里原来是
+`pip install --editable .`，一旦 extra 化，这句话就不再安装 `neug`，
+**生产镜像会失去 NeuG**，表现是"镜像能构建、能迁移、能冒烟通过，但第一次检索报
+ImportError"——一个只在生产才出现的失败。所以必须同时改：
+
+| 位置 | 改动 | 原因 |
+| --- | --- | --- |
+| `Dockerfile` | `--editable '.[knowledge]'` | 否则生产镜像没有引擎 |
+| `ci.yml` / `deploy.yml` | `--editable '.[dev,knowledge]'` | 否则引擎用例在 CI 上被静默跳过 |
+| `dev` extra | **不含** `neug` | 测试套件必须在所有平台可安装 |
+
+`tests/infra/test_deployment_assets.py` 与 `test_oss_release.py` 分别钉住了
+"镜像必须带 `knowledge` extra" 与"`neug` 不得出现在必需依赖或 `dev` 里"。
+
+### 验证方式
+
+1. **行为测试**（比语法检查强）：在一个子进程里安装 `sys.meta_path` 拦截器**屏蔽 `neug`**，
+   然后 `import aer` 并打印版本——必须成功。这一条在两种环境下都有意义：
+   本机本来就没装引擎，CI 上装了引擎、只有主动屏蔽才能证明它"不被需要"。
+2. Windows 上 `pip install --dry-run --ignore-installed aer-runtime` 能解析通过。
+3. `curl https://pypi.org/pypi/neug/0.2.0/json` 复核它确实没有 Windows 分发——
+   这条事实是会变的，所以写在这里而不是当成常识。
+
+### 重新评估触发条件
+
+- `neug` 发布 Windows wheel 时（那时可以把它并回必需依赖，并删掉 extra）；
+- 或者引擎从"检索的一种实现"变成"运行时的必需能力"时（那时它就不该是 extra）。
+
+---
+
 ## 模板（后续决策请复制此结构）
 
 ```text

@@ -18,19 +18,24 @@ AER 的目标是**把 Agent 的真实执行轨迹变成可追踪、可验证、�
 python -m venv .venv
 . .venv/bin/activate            # Windows: .venv\Scripts\activate
 
-pip install -e ".[dev]"
+pip install -e ".[dev,knowledge]"   # Windows 上写 -e ".[dev]"
 ```
 
 `[dev]` 会带上 `pytest`、`ruff`、`mypy`、`pyyaml`。最后一个不是可有可无的：基础设施测试
 **真的解析** `deploy/compose.yaml` 与 workflow 文件，而不是对它们做文本匹配。
 
-运行时依赖：`pydantic` 2.x、`SQLAlchemy` 2.x、`Alembic` 1.13+、`neug==0.2.0`。
-`neug` 是精确锁定的——知识层的正确性建立在 NeuG 0.2.0 的**实测行为**上，理由见
-`docs/DECISIONS.md` D-055。
+`[knowledge]` 是引擎侧检索（NeuG 索引）所需的 extra，**故意不并进 `[dev]`**：它在 PyPI 上
+只有 macOS(arm64) 与 Linux 的 wheel，没有 Windows 分发，声明成必需会让 Windows 上连
+`pip install aer-runtime` 都装不上（`docs/DECISIONS.md` D-065）。所以：
 
-> 在 Windows 上 `neug` 没有 wheel，知识层的**引擎相关**测试会被跳过。这不是失败，
-> 但也意味着**本机绿色不等于 CI 绿色**：涉及引擎行为的改动必须在 CI（或 Linux 容器）
-> 上确认。这一轮的真实教训见 [`docs/TASKS.md`](docs/TASKS.md) 的 M6 记录。
+- 运行时依赖：`pydantic` 2.x、`SQLAlchemy` 2.x、`Alembic` 1.13+；
+- 引擎依赖：`neug==0.2.0`，**精确锁定**——知识层的正确性建立在 NeuG 0.2.0 的**实测行为**上，
+  理由见 D-055，重新评估条件也记在那里。
+
+> **在 Windows 上装不了 `neug`**，知识层的**引擎相关**测试会被跳过（不是失败）。
+> 这意味着**本机绿色不等于 CI 绿色**：涉及引擎行为的改动必须在 CI（或 Linux 容器）上确认，
+> CI 与镜像用的都是 `.[dev,knowledge]` / `.[knowledge]`。M6 的三次生产验收失败全部是
+> 「本地全绿」的问题，记录见 [`docs/TASKS.md`](docs/TASKS.md)。
 
 ---
 

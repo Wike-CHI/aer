@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -221,10 +223,58 @@ class TestVersionAndMetadata:
         """A missing runtime dependency is an ImportError in somebody's venv."""
         names = {re.split(r"[<>=!~]", dep)[0] for dep in project["dependencies"]}
 
-        assert names == {"alembic", "neug", "pydantic", "sqlalchemy"}
-        # `neug` is pinned exactly on purpose (D-055); a range would mean shipping
-        # code verified against a different engine.
-        assert "neug==0.2.0" in project["dependencies"]
+        assert names == {"alembic", "pydantic", "sqlalchemy"}
+
+    def test_the_engine_is_an_extra_and_not_a_requirement(self, project: dict[str, Any]) -> None:
+        """D-065: a required `neug` makes `pip install aer-runtime` impossible on Windows.
+
+        Measured, not assumed: `neug==0.2.0` publishes wheels for macOS and manylinux
+        only -- no Windows wheel and no sdist -- so requiring it failed the whole
+        install with `No matching distribution found for neug==0.2.0`, even though the
+        runtime, the verifiers, distillation and the store all work on Windows.
+        """
+        extras = project["optional-dependencies"]
+
+        assert "neug==0.2.0" in extras["knowledge"], "the engine must stay reachable"
+        assert not any(dep.startswith("neug") for dep in project["dependencies"])
+        # Deliberately not in `dev` either: the test suite has to be installable on
+        # every platform, and CI asks for `.[dev,knowledge]` explicitly.
+        assert not any(dep.startswith("neug") for dep in extras["dev"])
+
+    def test_importing_aer_does_not_need_the_engine(self) -> None:
+        """The extra is only honest while `import aer` works without the engine.
+
+        D-065 moved `neug` out of the required dependencies. That is defensible only
+        if nothing imports it eagerly, so the claim is tested by *blocking* it and
+        importing the package in a subprocess. Blocking is what makes the test mean
+        something in both environments: here the engine is absent anyway, and in CI it
+        is installed -- where only an active blocker can prove it is not needed.
+        """
+        script = "\n".join(
+            [
+                "import sys",
+                "",
+                "class BlockEngine:",
+                "    def find_spec(self, name, path=None, target=None):",
+                "        if name == 'neug' or name.startswith('neug.'):",
+                "            raise ImportError('engine blocked for this test')",
+                "        return None",
+                "",
+                "sys.meta_path.insert(0, BlockEngine())",
+                "import aer",
+                "print(aer.__version__)",
+            ]
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=REPOSITORY_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout.strip() == __version__
 
     def test_points_at_the_repository(self, project: dict[str, Any]) -> None:
         urls = project.get("urls", {})

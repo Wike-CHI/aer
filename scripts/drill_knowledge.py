@@ -48,6 +48,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         results.append((label, holds, detail))
         print(f"  [{'ok  ' if holds else 'FAIL'}] {label}{('  -- ' + detail) if detail else ''}")
 
+    # The two problems differ so that the retrieval query has to rank them by
+    # relevance rather than returning whichever was written first.
+    problems = {
+        "RECOVERY": f"{PROBLEM} 应用密码无效，改用具备编辑权限的应用密码",
+        "FAILURE": f"{PROBLEM} 盲目重试无效",
+    }
+
     def store(runtime: AER, experience_id: str, kind: str, *, solution: str | None) -> None:
         from aer import Experience
 
@@ -57,7 +64,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 kind=ExperienceKind(kind),
                 domain="wordpress",
                 title=PROBLEM,
-                problem=f"{PROBLEM} {'应用密码无效，改用具备编辑权限的应用密码' if kind == 'RECOVERY' else '盲目重试无效'}",
+                problem=problems[kind],
                 dedup_key=f"{kind}|wordpress|{experience_id}",
                 root_cause="应用密码缺少 edit_posts",
                 solution=solution,

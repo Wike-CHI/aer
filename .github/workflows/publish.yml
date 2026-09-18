@@ -67,7 +67,6 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.12"
-  PACKAGE_NAME: aer-runtime
 
 jobs:
   publish:
@@ -151,31 +150,48 @@ jobs:
       # The version has to be checked against the *artifact*, not only against
       # pyproject.toml: a stale sdist or an unexpected build backend would show up
       # here and nowhere earlier.
+      #
+      # The filename carries the **normalised** distribution name -- `aer_runtime-0.6.0.tar.gz`,
+      # with an underscore -- not the project name `aer-runtime`. It is derived from
+      # the declared name rather than written out a second time, and the first dry run
+      # of this workflow is what caught the hyphen/underscore mismatch: `ls dist/`
+      # below is there so the next person sees the real filenames in the log.
       - name: The built artifacts carry the released version
         run: |
           set -Eeuo pipefail
           version="${{ steps.version.outputs.version }}"
-          test -f "dist/${PACKAGE_NAME}-${version}.tar.gz"
-          test -f "dist/${PACKAGE_NAME}-${version}-py3-none-any.whl"
-          python - <<'PY'
-          import glob, os, zipfile
-          version = os.environ["RELEASE_VERSION"]
-          wheel = glob.glob("dist/*.whl")
-          assert len(wheel) == 1, wheel
-          metadata = next(
-              name for name in zipfile.ZipFile(wheel[0]).namelist() if name.endswith(".dist-info/METADATA")
-          )
-          text = zipfile.ZipFile(wheel[0]).read(metadata).decode()
-          fields = dict(
-              line.split(": ", 1) for line in text.splitlines() if ": " in line and not line.startswith(" ")
-          )
+          dist_name="$(python -c '
+          import pathlib, re, tomllib
+
+          name = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["name"]
+          print(re.sub(r"[-_.]+", "_", name))
+          ')"
+          echo "distribution name: ${dist_name}"
+          ls -1 dist/
+          test -f "dist/${dist_name}-${version}.tar.gz"
+          test -f "dist/${dist_name}-${version}-py3-none-any.whl"
+          python - "${version}" <<'PY'
+          import glob
+          import sys
+          import zipfile
+
+          version = sys.argv[1]
+          wheels = glob.glob("dist/*.whl")
+          assert len(wheels) == 1, wheels
+
+          archive = zipfile.ZipFile(wheels[0])
+          metadata = next(name for name in archive.namelist() if name.endswith(".dist-info/METADATA"))
+          fields = {
+              key: value
+              for line in archive.read(metadata).decode().splitlines()
+              if ": " in line and not line.startswith(" ")
+              for key, value in [line.split(": ", 1)]
+          }
           assert fields["Name"] == "aer-runtime", fields["Name"]
           assert fields["Version"] == version, fields["Version"]
           assert fields.get("License-Expression") == "Apache-2.0", fields.get("License-Expression")
           print("wheel metadata:", fields["Name"], fields["Version"], fields["License-Expression"])
           PY
-        env:
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
 
       # The check that `twine check` structurally cannot make. Install the *built*
       # wheel -- with its declared dependencies resolved, so a broken requirement

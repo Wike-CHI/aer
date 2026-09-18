@@ -128,6 +128,15 @@ def only_job_actions(publish_workflow: dict[str, Any]) -> list[str]:
     return step_actions(publish_workflow, jobs[0])
 
 
+def read_package_name() -> str:
+    """The declared distribution name, as written in ``pyproject.toml``.
+
+    Note that this is *not* the name that appears in artifact filenames: see
+    ``test_the_artifact_name_check_uses_the_normalised_distribution_name``.
+    """
+    return str(tomllib.loads(read_repo_file("pyproject.toml"))["project"]["name"])
+
+
 def declared_package_data() -> list[str]:
     """The ``package-data`` patterns declared for the ``aer`` package.
 
@@ -344,6 +353,24 @@ class TestPublishWorkflow:
         for forbidden in ("TWINE_PASSWORD", "TWINE_USERNAME", "PYPI_API_TOKEN", "PYPI_TOKEN"):
             assert forbidden not in document, f"{forbidden} must never appear in this workflow"
         assert "password:" not in document
+
+    def test_the_artifact_name_check_uses_the_normalised_distribution_name(self) -> None:
+        """`python -m build` writes `aer_runtime-0.6.0.tar.gz`, not `aer-runtime-...`.
+
+        The distribution name is normalised (hyphens become underscores; PEP 427 /
+        PEP 503), and the first dry run of `publish.yml` failed on precisely that: the
+        check looked for `aer-runtime-0.6.0.tar.gz`, which has never existed. Asserted
+        here because the failure mode is a red workflow at release time, which is the
+        worst possible moment to discover a spelling rule.
+        """
+        document = read_repo_file(".github/workflows/publish.yml")
+        normalised = re.sub(r"[-_.]+", "_", read_package_name())
+
+        assert normalised == "aer_runtime", f"unexpected normalisation: {normalised}"
+        assert 're.sub(r"[-_.]+", "_", name)' in document, "the name must be derived, not repeated"
+        assert "dist/${dist_name}-${version}.tar.gz" in document
+        # A hardcoded literal is what broke the first dry run.
+        assert "dist/aer-runtime" not in document
 
     def test_the_upload_job_also_builds_the_artifact(
         self, publish_workflow: dict[str, Any]

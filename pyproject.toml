@@ -75,6 +75,9 @@ known-first-party = ["aer", "tests"]
 # exists to catch a comma that looks like a comma in code; here it would only
 # pressure the fixtures into English.
 "tests/knowledge/**" = ["B011", "RUF001"]
+# Same reason, and the same subject matter: this drill builds a Chinese knowledge
+# corpus and the punctuation is part of the data being searched for.
+"scripts/drill_knowledge.py" = ["RUF001"]
 # scripts/ are file-invoked operator entry points, not a package, so a sibling
 # import has to sit below the sys.path fix-up that makes it resolvable.
 "scripts/restore_sqlite.py" = ["E402"]

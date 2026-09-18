@@ -277,28 +277,15 @@ class KnowledgeProjector:
         self._index.close()
         swapped = False
         try:
-            if live.exists():
-                live.rename(previous)
-            staging.rename(live)
+            _swap_index_artifacts(live, staging, previous)
             swapped = True
         except OSError as exc:
-            # Put the original back rather than leaving the live path absent.
-            if previous.exists() and not live.exists():
-                previous.rename(live)
             raise ProjectionError(
                 f"Swapping the rebuilt knowledge index into {live} failed: {exc}. "
                 "The previous index was restored and remains usable."
             ) from exc
         finally:
             if swapped:
-                # Both, and `staging` is the one that matters. The staging directory
-                # was renamed into place, so what is left of it is its **sidecar**,
-                # named after the staging path -- `aer-knowledge.rebuilding
-                # .projection.json`. Removing only `previous` (which the first fix
-                # did) leaves that file behind in the knowledge directory with a
-                # stale schema version in it. Found by running the acceptance script
-                # on the real server, twice: the first run showed the leftover, the
-                # first fix removed the wrong one.
                 _remove_index_artifacts(previous)
                 _remove_index_artifacts(staging)
 
@@ -479,6 +466,46 @@ def _to_indexed(experience: Experience, run_ids: tuple[str, ...]) -> IndexedExpe
 def _join_lines(values: tuple[str, ...]) -> str:
     """One entry per line, each collapsed to a single line."""
     return "\n".join(" ".join(value.split()) for value in values if value.strip())
+
+
+def _swap_index_artifacts(live: Path, staging: Path, previous: Path) -> None:
+    """Move the freshly built index into place, metadata included.
+
+    The sidecar is named after the database path, so it does **not** travel with a
+    directory rename and has to be moved explicitly. Both the directory and its
+    metadata move together or neither does -- three attempts at this sequence were
+    needed to get there, and each failure was a different half-move:
+
+    1. moving the directory only left `aer-knowledge.rebuilding.projection.json`
+       behind in the knowledge directory;
+    2. deleting that leftover afterwards instead of moving it left the live index
+       with no metadata at all, so the next open refused it -- correctly, and
+       confusingly, because the message talks about an unknown layout rather than
+       about a missing file.
+
+    On failure the previous index -- directory *and* sidecar -- is put back, so the
+    live path is never a directory without its metadata.
+    """
+    live_sidecar = Path(projection_metadata_path(str(live)))
+    staging_sidecar = Path(projection_metadata_path(str(staging)))
+    previous_sidecar = Path(projection_metadata_path(str(previous)))
+
+    moved_live = False
+    try:
+        if live.exists():
+            live.rename(previous)
+            if live_sidecar.exists():
+                live_sidecar.rename(previous_sidecar)
+            moved_live = True
+        staging.rename(live)
+        if staging_sidecar.exists():
+            staging_sidecar.rename(live_sidecar)
+    except OSError:
+        if moved_live and previous.exists() and not live.exists():
+            previous.rename(live)
+            if previous_sidecar.exists() and not live_sidecar.exists():
+                previous_sidecar.rename(live_sidecar)
+        raise
 
 
 def _remove_index_artifacts(path: Path) -> None:

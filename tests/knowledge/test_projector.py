@@ -9,6 +9,7 @@ re-checked against the real engine in ``test_neug_index.py``.
 
 from __future__ import annotations
 
+import shutil
 from datetime import timedelta
 from pathlib import Path
 
@@ -16,7 +17,11 @@ import pytest
 
 from aer import AER, ExperienceSource, ExperienceStatus
 from aer.exceptions import ProjectionError
-from aer.knowledge.projector import KnowledgeProjector, _remove_index_artifacts
+from aer.knowledge.projector import (
+    KnowledgeProjector,
+    _remove_index_artifacts,
+    _swap_index_artifacts,
+)
 from aer.knowledge.schema import projection_metadata_path
 from aer.runtime.enums import ProjectionAction
 from aer.storage.models import ExperienceRow, ExperienceSourceRow
@@ -468,3 +473,86 @@ def _hard_delete(runtime: AER, experience_id: str, run_id: str) -> None:
         link = session.get(ExperienceSourceRow, (experience_id, run_id))
         if link is not None:
             session.delete(link)
+
+
+class TestTheSwap:
+    """The filesystem half of a rebuild, tested without an engine.
+
+    Two bugs in a row lived in these thirty lines, both of them half-moves of a
+    directory whose metadata file is named separately. The swap is pure filesystem
+    work, so it can be checked here rather than only on a server.
+    """
+
+    @staticmethod
+    def _live(tmp_path: Path) -> tuple[Path, Path, Path]:
+        live = tmp_path / "aer-knowledge"
+        live.mkdir()
+        (live / "old-index").write_text("old", encoding="utf-8")
+        Path(projection_metadata_path(str(live))).write_text(
+            '{"projection_schema_version": 1, "generation": "old"}', encoding="utf-8"
+        )
+        staging = tmp_path / "aer-knowledge.rebuilding"
+        staging.mkdir()
+        (staging / "new-index").write_text("new", encoding="utf-8")
+        Path(projection_metadata_path(str(staging))).write_text(
+            '{"projection_schema_version": 1, "generation": "new"}', encoding="utf-8"
+        )
+        return live, staging, tmp_path / "aer-knowledge.previous"
+
+    def test_the_metadata_moves_with_the_directory(self, tmp_path: Path) -> None:
+        """The bug the drill found: a directory in place with no sidecar beside it."""
+        live, staging, previous = self._live(tmp_path)
+
+        _swap_index_artifacts(live, staging, previous)
+
+        assert (live / "new-index").exists()
+        assert not (live / "old-index").exists()
+        sidecar = Path(projection_metadata_path(str(live)))
+        assert sidecar.exists(), "the live index would be refused without its sidecar"
+        assert "new" in sidecar.read_text(encoding="utf-8")
+
+    def test_nothing_of_the_rebuilding_name_is_left_behind(self, tmp_path: Path) -> None:
+        """The first bug: a stray `.rebuilding.projection.json` in the live directory."""
+        live, staging, previous = self._live(tmp_path)
+
+        _swap_index_artifacts(live, staging, previous)
+
+        assert not staging.exists()
+        assert not Path(projection_metadata_path(str(staging))).exists()
+
+    def test_the_previous_index_is_left_for_the_caller_to_remove(self, tmp_path: Path) -> None:
+        """The swap does not delete: `rebuild` decides, after it knows the swap worked."""
+        live, staging, previous = self._live(tmp_path)
+
+        _swap_index_artifacts(live, staging, previous)
+
+        assert previous.is_dir()
+        assert Path(projection_metadata_path(str(previous))).exists()
+
+    def test_a_first_build_has_nothing_to_move_aside(self, tmp_path: Path) -> None:
+        live = tmp_path / "aer-knowledge"
+        staging = tmp_path / "aer-knowledge.rebuilding"
+        staging.mkdir()
+        Path(projection_metadata_path(str(staging))).write_text(
+            '{"projection_schema_version": 1}', encoding="utf-8"
+        )
+
+        _swap_index_artifacts(live, staging, tmp_path / "aer-knowledge.previous")
+
+        assert live.is_dir()
+        assert Path(projection_metadata_path(str(live))).exists()
+
+    def test_a_failure_puts_the_previous_index_back(self, tmp_path: Path) -> None:
+        """A failed swap must not leave a directory with no metadata beside it."""
+        live, staging, previous = self._live(tmp_path)
+        # Make the final rename fail by removing the staging directory first.
+        shutil.rmtree(staging)
+
+        with pytest.raises(OSError):
+            _swap_index_artifacts(live, staging, previous)
+
+        assert live.is_dir()
+        assert (live / "old-index").exists()
+        sidecar = Path(projection_metadata_path(str(live)))
+        assert sidecar.exists()
+        assert "old" in sidecar.read_text(encoding="utf-8")

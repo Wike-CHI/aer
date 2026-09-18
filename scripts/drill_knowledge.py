@@ -34,17 +34,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("workdir", nargs="?", default="/tmp/knowledge-drill")
     args = parser.parse_args(argv)
 
-    # The given directory is treated as a *parent* the caller has made writable,
-    # not as something to create: the container runs as uid 10001 and does not own
-    # `/`, so creating the path itself would fail on the host's root directory. The
-    # drill's own scratch space lives one level down, where it can be recreated on
-    # every run without needing permission it does not have.
-    parent = Path(args.workdir)
-    if not parent.is_dir():
-        raise SystemExit(f"{parent} does not exist: create it first, owned by uid 10001")
-    root = parent / "run"
-    shutil.rmtree(root, ignore_errors=True)
-    root.mkdir(parents=True, exist_ok=True)
+    # The argument is the drill's own directory. It is created if missing, and its
+    # scratch space lives one level down so the drill can clear that on every run
+    # without needing to remove and recreate the directory the caller named.
+    #
+    # The failure this reports is the real one: inside the container, a path whose
+    # parent is not writable by uid 10001 cannot be used. Pointing the drill at the
+    # host's root directory is the mistake that produced it, twice.
+    root = Path(args.workdir)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise SystemExit(
+            f"cannot use {root}: {exc} -- pass a path inside a writable directory, "
+            "e.g. the default /tmp/knowledge-drill"
+        ) from exc
+    work = root / "run"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True, exist_ok=True)
 
     from aer import AER, ExperienceKind, ExperienceStatus, RetrievalMode
     from aer.knowledge.formatter import ExperienceContextFormatter
@@ -92,8 +99,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
 
     print("## 1. a throwaway store with the brief's corpus")
-    data = root / "data"
-    knowledge = root / "knowledge"
+    data = work / "data"
+    knowledge = work / "knowledge"
     with AER(data, knowledge_dir=knowledge) as runtime:
         store(runtime, "exp-recovery", "RECOVERY", solution="改用有 edit_posts 权限的应用密码")
         store(runtime, "exp-failure", "FAILURE", solution=None)
@@ -170,7 +177,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # What `/srv/aer/knowledge` looks like today. Projecting nothing must be a
         # success, and retrieval against an index with no documents must return an
         # empty result rather than failing -- that is the state production is in.
-        with AER(root / "empty-data", knowledge_dir=root / "empty-knowledge") as empty_runtime:
+        with AER(work / "empty-data", knowledge_dir=work / "empty-knowledge") as empty_runtime:
             empty_report = empty_runtime.rebuild_knowledge()
             check("rebuilding an empty store succeeds", empty_report.projected == 0)
             empty_status = empty_runtime.knowledge_status()

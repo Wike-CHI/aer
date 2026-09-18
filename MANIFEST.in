@@ -1,0 +1,33 @@
+# Source-distribution contents for AER.
+#
+# The wheel is configured entirely in pyproject.toml; this file exists because an
+# sdist has to carry a few things setuptools cannot infer from the package
+# directory alone, and `python -m build` builds the wheel **from the sdist** by
+# default. Anything missing here therefore goes missing from the wheel too -- and
+# the failure shows up as `StorageError` on a user's first `AER(...)` call rather
+# than at build time.
+#
+# Two of these are load-bearing for a working install:
+#
+#   * `alembic.ini` and `migrations/` -- copied into the package by setup.py at
+#     build time, so they must survive into the sdist for that copy to have
+#     anything to copy (docs/DECISIONS.md D-054);
+#   * `LICENSE` -- Apache-2.0 requires the license text to accompany the work,
+#     and `project.license-files` can only collect a file that is there.
+#
+# Tests, docs, deploy/ and the ops scripts are deliberately absent: they are not
+# needed to build or to install, and shipping them would only make the sdist
+# heavier than the thing it distributes.
+
+include LICENSE
+include alembic.ini
+recursive-include migrations *.py *.mako
+
+# The build shim itself, and its own manifest: the copy step in setup.py runs while
+# building the wheel from this sdist, so both have to be present in it.
+include MANIFEST.in
+include setup.py
+
+# pyproject.toml is included by setuptools automatically; named here so the
+# intention is readable rather than implied.
+include pyproject.toml

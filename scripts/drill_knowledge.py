@@ -34,7 +34,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("workdir", nargs="?", default="/tmp/knowledge-drill")
     args = parser.parse_args(argv)
 
-    root = Path(args.workdir)
+    # The given directory is treated as a *parent* the caller has made writable,
+    # not as something to create: the container runs as uid 10001 and does not own
+    # `/`, so creating the path itself would fail on the host's root directory. The
+    # drill's own scratch space lives one level down, where it can be recreated on
+    # every run without needing permission it does not have.
+    parent = Path(args.workdir)
+    if not parent.is_dir():
+        raise SystemExit(f"{parent} does not exist: create it first, owned by uid 10001")
+    root = parent / "run"
     shutil.rmtree(root, ignore_errors=True)
     root.mkdir(parents=True, exist_ok=True)
 

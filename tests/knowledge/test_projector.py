@@ -16,7 +16,8 @@ import pytest
 
 from aer import AER, ExperienceSource, ExperienceStatus
 from aer.exceptions import ProjectionError
-from aer.knowledge.projector import KnowledgeProjector, _remove_index_directory
+from aer.knowledge.projector import KnowledgeProjector, _remove_index_artifacts
+from aer.knowledge.schema import projection_metadata_path
 from aer.runtime.enums import ProjectionAction
 from aer.storage.models import ExperienceRow, ExperienceSourceRow
 from tests.knowledge.conftest import NOW, store_experience, store_run
@@ -361,32 +362,51 @@ class TestRebuild:
         assert knowledge_runtime.experiences.get(experience.id) is not None
 
 
-class TestStagingDirectoryGuard:
-    """``_remove_index_directory`` deletes a tree, so it only accepts its own names."""
+class TestStagingArtifactGuard:
+    """The cleanup helper deletes a tree, so it only accepts names it chose itself."""
 
     def test_it_refuses_a_directory_that_is_not_ours(self, tmp_path: Path) -> None:
         victim = tmp_path / "important"
         victim.mkdir()
         (victim / "data.txt").write_text("do not delete me", encoding="utf-8")
         with pytest.raises(ProjectionError, match="Refusing to remove"):
-            _remove_index_directory(victim)
+            _remove_index_artifacts(victim)
         assert (victim / "data.txt").exists()
 
     def test_it_removes_a_staging_directory(self, tmp_path: Path) -> None:
         staging = tmp_path / "aer-knowledge.rebuilding"
         staging.mkdir()
         (staging / "junk").write_text("x", encoding="utf-8")
-        _remove_index_directory(staging)
+        _remove_index_artifacts(staging)
         assert not staging.exists()
 
-    def test_a_missing_directory_is_not_an_error(self, tmp_path: Path) -> None:
-        _remove_index_directory(tmp_path / "aer-knowledge.previous")
+    def test_it_removes_the_staging_metadata_too(self, tmp_path: Path) -> None:
+        """The leftover the production acceptance run actually found.
+
+        The sidecar is named after the database path, so renaming
+        ``aer-knowledge.rebuilding`` into place leaves
+        ``aer-knowledge.rebuilding.projection.json`` behind -- a stale schema version
+        sitting next to the live one, which is the first thing an operator reads when
+        something is wrong.
+        """
+        staging = tmp_path / "aer-knowledge.rebuilding"
+        staging.mkdir()
+        sidecar = Path(projection_metadata_path(str(staging)))
+        sidecar.write_text('{"projection_schema_version": 1}', encoding="utf-8")
+
+        _remove_index_artifacts(staging)
+
+        assert not staging.exists()
+        assert not sidecar.exists()
+
+    def test_a_missing_artifact_is_not_an_error(self, tmp_path: Path) -> None:
+        _remove_index_artifacts(tmp_path / "aer-knowledge.previous")
 
     def test_a_file_is_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "aer-knowledge.rebuilding"
         path.write_text("not a directory", encoding="utf-8")
         with pytest.raises(ProjectionError, match="not a directory"):
-            _remove_index_directory(path)
+            _remove_index_artifacts(path)
 
 
 class TestRunProjection:

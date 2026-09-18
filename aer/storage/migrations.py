@@ -10,6 +10,10 @@ AER has exactly **one** schema-history mechanism: Alembic revisions under
 Keeping a single path means a test that opens ``AER(path)`` exercises the same
 schema provisioning that production uses; ``Base.metadata.create_all()`` is no
 longer part of it (it survives only as the *source of truth for autogenerate*).
+
+Where the revisions are read from depends on how AER was installed, never on how
+it is called: see :func:`_repository_root` for the two layouts and why the wheel
+carries its own copy.
 """
 
 from __future__ import annotations
@@ -34,15 +38,36 @@ DB_PATH_ATTRIBUTE = "db_path"
 CONFIGURE_LOGGER_ATTRIBUTE = "configure_logger"
 
 
-def _repository_root() -> Path:
-    """Locate the directory containing ``alembic.ini``.
+#: The copy of ``alembic.ini`` and ``migrations/`` that a wheel carries *inside*
+#: the package (staged at build time by ``setup.py``). It does not exist in a
+#: source checkout or an editable install, where the repository root is used.
+_PACKAGED_ROOT = Path(__file__).resolve().parent.parent / "_migrations"
 
-    Walks up from this module so it works for a source checkout and for an
-    editable install, without hard-coding an absolute path.
+
+def _repository_root() -> Path:
+    """Locate the directory holding ``alembic.ini`` and ``migrations/``.
+
+    Two layouts are supported, and they hold the same files:
+
+    * **A source checkout or an editable install** -- the repository root, found by
+      walking up from this module. Checked first on purpose: a developer must
+      migrate with the revisions they are looking at, never with a copy an earlier
+      build left behind.
+    * **An installed wheel** -- ``aer/_migrations``, staged by ``setup.py``. A
+      regular (non-editable) install has no repository root to walk up to, which
+      is why ``pip install aer-runtime`` used to produce a library that could not
+      open a database at all (docs/DECISIONS.md D-054, superseding D-040).
+
+    Raises:
+        StorageError: neither layout is present, i.e. the installation is broken.
     """
     for candidate in Path(__file__).resolve().parents:
         if (candidate / "alembic.ini").is_file():
             return candidate
+
+    if (_PACKAGED_ROOT / "alembic.ini").is_file() and (_PACKAGED_ROOT / "migrations").is_dir():
+        return _PACKAGED_ROOT
+
     raise StorageError(
         "Cannot locate alembic.ini: AER's migration scripts are missing from the "
         "installation. Reinstall the package or run from a source checkout."

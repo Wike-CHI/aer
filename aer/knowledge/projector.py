@@ -39,6 +39,7 @@ from pathlib import Path
 
 from aer.exceptions import ProjectionError
 from aer.knowledge.base import IndexedExperience, IndexedRunRef, KnowledgeIndex
+from aer.knowledge.schema import projection_metadata_path
 from aer.runtime.enums import ProjectionAction
 from aer.runtime.models import Experience, Run
 from aer.storage.repositories import (
@@ -259,8 +260,8 @@ class KnowledgeProjector:
         live = Path(self._index.path)
         staging = live.with_name(live.name + _STAGING_SUFFIX)
         previous = live.with_name(live.name + _PREVIOUS_SUFFIX)
-        _remove_index_directory(staging)
-        _remove_index_directory(previous)
+        _remove_index_artifacts(staging)
+        _remove_index_artifacts(previous)
 
         staged = NeuGKnowledgeIndex(staging, environ=self._index.environ)
         try:
@@ -269,7 +270,7 @@ class KnowledgeProjector:
             self._validate(staged)
         except BaseException:
             staged.close()
-            _remove_index_directory(staging)
+            _remove_index_artifacts(staging)
             raise
         staged.close()
 
@@ -290,7 +291,7 @@ class KnowledgeProjector:
             ) from exc
         finally:
             if swapped:
-                _remove_index_directory(previous)
+                _remove_index_artifacts(previous)
 
         duration_ms = (time.perf_counter() - started) * 1000
         report = RebuildReport(
@@ -471,20 +472,27 @@ def _join_lines(values: tuple[str, ...]) -> str:
     return "\n".join(" ".join(value.split()) for value in values if value.strip())
 
 
-def _remove_index_directory(path: Path) -> None:
-    """Delete a staging or superseded index directory, refusing anything else.
+def _remove_index_artifacts(path: Path) -> None:
+    """Delete a staging or superseded index: the directory **and** its sidecar.
 
-    Guarded by suffix rather than trusting the caller: this function deletes a
-    directory tree, and the only directories it is ever allowed to delete are ones
-    this module created under names it chose.
+    Both, because the sidecar is named after the database path
+    (``aer-knowledge.rebuilding.projection.json``), so renaming the directory into
+    place leaves the staging metadata orphaned in the knowledge directory. The first
+    version removed only the directory, and the acceptance run on the real server
+    showed the leftover file -- a stale schema version sitting beside the live one,
+    which is exactly what an operator would read first during an incident.
+
+    Refuses anything whose name it did not choose: this function deletes a tree.
     """
-    if not path.exists():
-        return
-    if not path.is_dir():
-        raise ProjectionError(f"Refusing to remove {path}: not a directory")
     if not path.name.endswith((_STAGING_SUFFIX, _PREVIOUS_SUFFIX)):
         raise ProjectionError(
             f"Refusing to remove {path}: it is not a staging ({_STAGING_SUFFIX}) or "
-            f"superseded ({_PREVIOUS_SUFFIX}) index directory"
+            f"superseded ({_PREVIOUS_SUFFIX}) index artifact"
         )
-    shutil.rmtree(path)
+    if path.exists():
+        if not path.is_dir():
+            raise ProjectionError(f"Refusing to remove {path}: not a directory")
+        shutil.rmtree(path)
+    sidecar = Path(projection_metadata_path(str(path)))
+    if sidecar.exists():
+        sidecar.unlink()

@@ -9,13 +9,16 @@ genuinely has an open state that gets completed).
 
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from collections.abc import Sequence
+
+from sqlalchemy import and_, case, func, select
 
 from aer.runtime.enums import VerifierType
 from aer.runtime.models import VerificationRecord
 from aer.storage.converters import decode_enum, dump_json_object, load_json_object
 from aer.storage.database import Database
 from aer.storage.models import VerificationRow
+from aer.verification.summary import VerificationSummary
 
 
 class VerificationRepository:
@@ -97,6 +100,60 @@ class VerificationRepository:
                 statement = statement.where(VerificationRow.required.is_(required))
             total = int(session.execute(statement).scalar_one())
         return total
+
+    def summaries_by_run(self, run_ids: Sequence[str]) -> dict[str, VerificationSummary]:
+        """Aggregate verdicts for several runs in one query, keyed by run id.
+
+        Added for the effectiveness report. Asking :meth:`get_by_run` per run and
+        aggregating in Python would read every verdict row of every run beneath a set
+        of usage rows -- the N+1 that round-7 brief section 56 forbids -- and the
+        aggregation would then exist in two places.
+
+        **A run with no verdicts is absent from the result, not present with
+        zeroes.** The absence is load-bearing: :class:`VerificationSummary` treats
+        ``total == 0`` as "nobody checked", and a caller that reads a missing key as
+        a summary would compute a pass rate out of nothing.
+        """
+        if not run_ids:
+            return {}
+        summaries: dict[str, VerificationSummary]
+        with self._database.session("summarise verifications by run") as session:
+            statement = (
+                select(
+                    VerificationRow.run_id.label("run_id"),
+                    func.count().label("total"),
+                    func.sum(case((VerificationRow.passed.is_(True), 1), else_=0)).label("passed"),
+                    func.sum(case((VerificationRow.required.is_(True), 1), else_=0)).label(
+                        "required_total"
+                    ),
+                    func.sum(
+                        case(
+                            (
+                                and_(
+                                    VerificationRow.required.is_(True),
+                                    VerificationRow.passed.is_(True),
+                                ),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ).label("required_passed"),
+                )
+                .where(VerificationRow.run_id.in_(list(run_ids)))
+                .group_by(VerificationRow.run_id)
+            )
+            rows = session.execute(statement).all()
+            summaries = {
+                row.run_id: VerificationSummary.from_counts(
+                    row.run_id,
+                    total=int(row.total),
+                    passed=int(row.passed or 0),
+                    required_total=int(row.required_total or 0),
+                    required_passed=int(row.required_passed or 0),
+                )
+                for row in rows
+            }
+        return summaries
 
 
 # ---------------------------------------------------------------------------

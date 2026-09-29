@@ -115,6 +115,33 @@ class TestVerifiedSuccess:
         for status in (RunStatus.FAILED, RunStatus.ABORTED, RunStatus.PARTIAL_SUCCESS):
             assert is_verified_success(status, summary_of(verdict(passed=True))) is False
 
+    def test_an_inconclusive_run_with_a_passing_required_check_is_a_verified_success(
+        self,
+    ) -> None:
+        """Round-8.1.1 section 2: verification substitutes for a missing declaration.
+
+        This is the case the whole status exists for. An integration whose session hooks
+        carry no outcome can never say ``SUCCESS``; if a passing required check could not
+        stand in for the declaration, a task that was *independently proven* done would
+        have no way to be recorded as one.
+        """
+        assert is_verified_success(RunStatus.INCONCLUSIVE, summary_of(verdict(passed=True))) is True
+
+    def test_an_inconclusive_run_without_a_required_check_is_still_not_verified(self) -> None:
+        """Nothing declared and nothing checked is unknown, not a success."""
+        assert is_verified_success(RunStatus.INCONCLUSIVE, summary_of()) is False
+
+    def test_an_inconclusive_run_is_not_saved_by_an_optional_check(self) -> None:
+        """An opinion cannot stand in for the declaration a required check replaces."""
+        summary = summary_of(verdict(passed=True, required=False, name="llm_quality"))
+
+        assert is_verified_success(RunStatus.INCONCLUSIVE, summary) is False
+
+    def test_an_inconclusive_run_with_a_failed_required_check_is_not_verified(self) -> None:
+        assert (
+            is_verified_success(RunStatus.INCONCLUSIVE, summary_of(verdict(passed=False))) is False
+        )
+
     def test_a_running_run_is_not_a_verified_success(self) -> None:
         assert is_verified_success(RunStatus.RUNNING, summary_of(verdict(passed=True))) is False
 

@@ -7,7 +7,14 @@ the reason attached to it, because a boolean nobody can explain is not auditable
 
 from __future__ import annotations
 
-from aer import AER, DistillationTrigger, ExperienceKind, HttpStatusVerifier, RunStatus
+from aer import (
+    AER,
+    DistillationTrigger,
+    ExperienceKind,
+    HttpStatusVerifier,
+    RunStatus,
+    VerificationContext,
+)
 from tests.experience.support import (
     add_human_feedback,
     build_false_success_run,
@@ -52,6 +59,156 @@ class TestPlainSuccessIsIgnored:
         assert decision.should_distill is False
         assert decision.kind is None
         assert "still RUNNING" in decision.reasons[0]
+
+
+class TestInconclusiveOutcomes:
+    """Round-8.1.1 section 4: what AER may learn from a run nobody described.
+
+    ``INCONCLUSIVE`` is not a sixth flavour of failure. It is the absence of a claim,
+    and the only thing that can replace a claim is evidence -- so these tests are about
+    the boundary between "unknown" and "established", not about severity.
+    """
+
+    @staticmethod
+    def _inconclusive(aer: AER, *, verified: bool) -> str:
+        """A run that ended without a declaration, optionally independently confirmed."""
+        context = aer.start_run(task="a session that ended without an outcome")
+        context.tool("wordpress.update_page")
+        if verified:
+            context.verify(
+                HttpStatusVerifier(expected_status=200, required=True),
+                context=VerificationContext(run_id=context.run_id, payload={"actual_status": 200}),
+            )
+        context.finish(RunStatus.INCONCLUSIVE)
+        return context.run_id
+
+    def test_nothing_is_learned_from_silence(self, aer: AER) -> None:
+        """No declaration, no verdict, no kind. The veto is the correct answer."""
+        run_id = self._inconclusive(aer, verified=False)
+
+        decision = aer.evaluate_distillation(run_id)
+
+        assert decision.should_distill is False
+        assert decision.kind is None
+        assert decision.triggers == ()
+        assert "no outcome was declared" in decision.reasons[0]
+
+    def test_a_recorded_error_does_not_rescue_it(self, aer: AER) -> None:
+        """The distinction that matters: an error inside the run is not a task outcome.
+
+        A ``FAILURE`` experience claims the goal was not met. An error proves a step did
+        not work, and for a run whose ending nobody described that is not the same
+        statement -- so the run is vetoed even though ``ERROR`` would normally trigger
+        distillation (D-100).
+        """
+        context = aer.start_run(task="a session that ended without an outcome")
+        try:
+            with context.tool("wordpress.update_page"):
+                raise RuntimeError("the update failed")
+        except RuntimeError:
+            pass
+        context.finish(RunStatus.INCONCLUSIVE)
+
+        decision = aer.evaluate_distillation(context.run_id)
+
+        assert decision.should_distill is False
+        assert decision.kind is None
+
+    def test_explicit_high_value_cannot_force_a_kind_out_of_nothing(self, aer: AER) -> None:
+        """There is no kind to record, so asking harder does not produce one."""
+        run_id = self._inconclusive(aer, verified=False)
+
+        decision = aer.evaluate_distillation(run_id, explicit_high_value=True)
+
+        assert decision.should_distill is False
+        assert decision.kind is None
+
+    def test_independent_evidence_makes_it_a_verified_success(self, aer: AER) -> None:
+        """The point of the whole status: proof replaces the missing declaration.
+
+        Note where the run is compared: against a *declared* success, not against a
+        failure. Once a required check has passed, an ``INCONCLUSIVE`` run is a verified
+        success in the same sense a ``SUCCESS`` run is -- which is what makes the
+        status worth having at all.
+        """
+        run_id = self._inconclusive(aer, verified=True)
+
+        assert aer.verified_success(run_id) is True
+
+        decision = aer.evaluate_distillation(run_id)
+
+        # And from there the ordinary policy applies unchanged: an uneventful verified
+        # success teaches nothing, exactly as it does when the agent declared one.
+        assert decision.should_distill is False
+        assert decision.kind is None
+        assert "plain verified success" in decision.reasons[0]
+
+    def test_an_eventful_run_becomes_distillable_once_evidence_settles_it(self, aer: AER) -> None:
+        """Same trajectory, different outcome: what the verification changed.
+
+        The recorded error is enough to make the run interesting; it is the *kind* that
+        needed the evidence. Without it the run above is vetoed, with it the run is a
+        ``SUCCESS`` whose errors are recorded as triggers -- and notably still not a
+        ``FAILURE``, because a successful run may contain failed steps.
+        """
+        run = aer.start_run(task="a session that ended without an outcome")
+        attempt = run.tool("wordpress.update_page")
+        try:
+            with attempt:
+                raise PermissionError("403 Forbidden")
+        except PermissionError:
+            pass
+        run.verify(
+            HttpStatusVerifier(expected_status=200, required=True),
+            context=VerificationContext(run_id=run.run_id, payload={"actual_status": 200}),
+        )
+        run.finish(RunStatus.INCONCLUSIVE)
+
+        decision = aer.evaluate_distillation(run.run_id)
+
+        assert decision.should_distill is True
+        assert decision.kind is ExperienceKind.SUCCESS
+        assert DistillationTrigger.ERROR in decision.triggers
+
+    def test_a_repaired_run_becomes_a_recovery(self, aer: AER) -> None:
+        """The highest-value kind is reachable without a declaration too."""
+        run = aer.start_run(task="a session that ended without an outcome")
+        attempt = run.tool("wordpress.update_page")
+        try:
+            with attempt:
+                raise PermissionError("403 Forbidden")
+        except PermissionError:
+            pass
+        error_id = attempt.error_record.id
+        with run.recovery(reason="REST API 403", error_id=error_id) as recovery:
+            recovery.set_result({"action": "granted_edit_posts"})
+        run.verify(
+            HttpStatusVerifier(expected_status=200, required=True),
+            context=VerificationContext(run_id=run.run_id, payload={"actual_status": 200}),
+        )
+        run.finish(RunStatus.INCONCLUSIVE)
+
+        decision = aer.evaluate_distillation(run.run_id)
+
+        assert decision.should_distill is True
+        assert decision.kind is ExperienceKind.RECOVERY
+
+    def test_the_old_statuses_still_read_as_failures(self, aer: AER) -> None:
+        """Regression: nothing about ``FAILED`` / ``ABORTED`` / ``PARTIAL_SUCCESS`` moved."""
+        for finish, expected in (
+            ("fail", RunStatus.FAILED),
+            ("abort", RunStatus.ABORTED),
+            ("partial_success", RunStatus.PARTIAL_SUCCESS),
+        ):
+            context = aer.start_run(task=f"{finish} run")
+            getattr(context, finish)()
+
+            decision = aer.evaluate_distillation(context.run_id)
+
+            assert context.status is expected
+            assert decision.should_distill is True
+            assert decision.kind is ExperienceKind.FAILURE
+            assert DistillationTrigger.FAILED_RUN in decision.triggers
 
 
 class TestRecoveryIsThePriority:

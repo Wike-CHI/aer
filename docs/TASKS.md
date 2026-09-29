@@ -915,123 +915,341 @@ Historical success rate:
 
 ---
 
-# 10. Milestone 7 — Experience Usage
+# 10. Milestone 7 — Experience Usage（已完成）
 
 ## Goal
 
-证明 Experience 到底有没有价值。
+证明 Experience 到底有没有价值：一条经验被检索之后，是否真正进入 Agent 上下文、
+Agent 是否采用、任务结果如何，以及它是否值得继续信任。
 
----
-
-## Task 7.1 — experience_usage
-
-记录：
+本轮的关键不是"加统计"，而是**拒绝错误归因**。四个区别必须进入数据模型：
 
 ```text
-experience_id
-run_id
-retrieved
-injected
-useful
-task_success
+Retrieved ≠ Injected ≠ Adopted ≠ Helpful
+Task SUCCESS ≠ Experience caused success
 ```
 
 ---
 
-## Task 7.2 — Injection Tracking
+## Task 7.1 — retrieval_sessions
 
-区分：
-
-```text
-Retrieved
-```
-
-和：
+一次检索一行，**0 结果也要写**（"查过但没有"≠"根本没查"）。
 
 ```text
-Injected
+id / run_id(nullable) / query_text(sanitized) / query_fingerprint / domain /
+mode / requested_limit / result_count / knowledge_projection_version /
+retrieval_policy_version / retrieval_duration_ms / experiment_id(nullable) /
+assignment / created_at / metadata_json
 ```
 
-检索出来但没有放入 Agent Context 的 Experience 不得算实际使用。
+`query_text` 只存 sanitized 检索问题（redact + 截断），不存原始 prompt /
+conversation / tool output。`query_fingerprint` 用于统计同类检索。
+
+`experiment_id` / `assignment`(NONE/TREATMENT/HOLDOUT) 为将来的 holdout 预留，
+本轮不实现实验框架。
 
 ---
 
-## Task 7.3 — Success Statistics
+## Task 7.2 — experience_usage 与 Injection Tracking
 
-统计：
-
-```text
-reuse_count
-success_count
-failure_count
-success_rate
-```
-
-计算：
+一行 = 一次 retrieval session × 一条 experience，数据库 UNIQUE 保证同一次检索中
+同一条经验最多出现一次。
 
 ```text
-success_rate =
-success_count / reuse_count
+id / retrieval_session_id / experience_id / rank / role / retrieval_score /
+retrieved_at / injected_at(nullable) / injection_position / injection_chars /
+context_fingerprint / formatter_version / usage_signal + source /
+utility_label + source / created_at / updated_at / metadata_json
 ```
-
-注意处理：
 
 ```text
-reuse_count = 0
+role 保存检索当时的角色（GUIDANCE / WARNING / OBSERVATION），
+     不根据 ExperienceKind 事后重算——检索策略将来会变。
+rank / retrieval_score 保存检索当时的值，不用今天的 Ranker 重算历史。
 ```
+
+**Injection 必须是结果的子集**：session 返回 A/B/C 时只能记录其中一部分，
+不能记录根本不在结果里的 D（FK + 应用层双重校验）。
+
+**不保存完整 Injected Prompt**：只存 experience ids / position / char count /
+formatter version / context fingerprint。避免重复数据、隐私泄漏、把注入内容永久化。
 
 ---
 
-## Task 7.4 — Experience Promotion
-
-建议默认规则：
-
-### VERIFIED → REUSED
+## Task 7.3 — UsageSignal / Utility
 
 ```text
-至少被其他 Run 实际注入一次
+usage_signal  UNKNOWN / ADOPTED / IGNORED / REJECTED    + source
+utility_label UNKNOWN / HELPFUL / NEUTRAL / HARMFUL     + source
 ```
-
-### REUSED → PROVEN
 
 ```text
-reuse_count >= 5
-success_rate >= 0.80
+source：AGENT / HUMAN / ADAPTER / EVALUATOR / SYSTEM
 ```
 
-### PROVEN → TRAINING_CANDIDATE
+**禁止自动行为推断**：不许因为 Agent 后来调用了 `update_page`、而经验里也有
+`update_page`，就把 UNKNOWN 改成 ADOPTED。推断最多留给将来带置信度的
+`inferred adoption`。
+
+转换规则：
 
 ```text
-reuse_count >= 10
-success_rate >= 0.90
-verification complete
+UNKNOWN → 任何值        允许
+相同值重复写入          幂等
+已确定值 → 其他值        拒绝，除非显式 override=True
 ```
 
-全部做成配置项。
+**ADOPTED ≠ HELPFUL**：Agent 完全可能采用了一条错误的经验。
 
 ---
 
-## Task 7.5 — Confidence Calculation
-
-禁止直接使用 LLM 输出作为最终 Confidence。
-
-建议：
+## Task 7.4 — Effectiveness 统计
 
 ```python
-confidence = (
-    verification_score * 0.30
-    + reuse_score * 0.25
-    + success_rate * 0.25
-    + human_score * 0.10
-    + freshness_score * 0.10
-)
+report = aer.experience_effectiveness(experience_id)
 ```
 
-第一版允许根据数据情况调整。
+```text
+retrieval_count / injection_count
+explicit_adoption_count / explicit_ignore_count / explicit_rejection_count
+helpful_count / neutral_count / harmful_count
+distinct_target_runs
+verified_success_runs / verified_failure_runs / run_failed_runs /
+unverified_runs / running_runs
+unattributed_usage_count
+observed_success_rate / injected_verified_success_rate /
+adopted_verified_success_rate
+```
+
+```text
+1. 计数单位是「不同的 run」，不是 usage 行。
+2. 分母只包含「已 Injected 且 target run 最终有 Verification」的 run。
+   UNVERIFIED 不算 Failure，也不进分母。
+3. adoption 子集单独报告，不与 injected 口径混合。
+```
+
+名字必须是 `observed_success_rate`：这是观察数据，不是因果效果。
+
+**Outcome 不重复落库**：不在 usage 表里存 `task_success`，任务结果在 Run +
+Verification，统计时 JOIN 派生，避免 Run 变了而 usage 里的副本过期。
 
 ---
 
-# 11. Milestone 8 — Sanitizer
+## Task 7.5 — Promotion（REUSED / PROVEN）
+
+```text
+VERIFIED → REUSED   被注入到与 source run 不同的真实 Run
+                    （仅被检索不算；被自己的 source run 注入也不算；不要求成功）
+REUSED  → PROVEN    全部阈值可配置（PromotionPolicy）：
+                      distinct adopted runs        >= 5
+                      adopted verified successes   >= 4
+                      adopted success rate         >= 0.80
+                      harmful feedback             == 0
+```
+
+只有 Injected 而全部 UNKNOWN：**可以 REUSED，默认不得自动 PROVEN**。
+
+`PROVEN` 仍然不是 causally proven，本节所有阈值都是配置项。
+
+---
+
+## Task 7.6 — Confidence
+
+```text
+confidence = 0.30 * verification + 0.25 * reuse + 0.25 * outcome
+           + 0.10 * feedback     + 0.10 * freshness
+```
+
+确定、可拆解、按需计算、**不写回**。同样的证据 + 同样的时钟 => 同样的数值。
+禁止 LLM 决定 confidence。
+
+---
+
+## Task 7.7 — 本轮明确不做
+
+```text
+HNSW / Embedding / Vector Retrieval
+Agent Adapter / Codex / Claude / Cursor / DSH Adapter（接口给 M8 留着）
+Dataset Builder / Preference Dataset / SFT Export / Training
+Workflow Promotion / A/B Experiment Framework / Dashboard / FastAPI
+Usage 投影进 NeuG
+自动行为推断 adoption
+```
+
+---
+
+# 10.1 Milestone 8 — Agent Adapter Protocol（已完成）
+
+## Goal
+
+让 Codex / Claude Code / Cursor / DSH / 内部 Agent 用**同一套协议**接入 AER，
+而 AER Core 完全不需要认识任何一种私有日志格式（round-8 brief，第 1 节）。
+
+本轮**只做**：
+
+```text
+Agent Adapter Protocol
++ Reference Adapter SDK（GenericAgentAdapter）
++ Fake / Generic Adapter（测试用两个不同风格的假 Agent）
+```
+
+本轮**不做**任何真实厂商 Adapter（属于 M8.1–M8.4）。
+
+---
+
+## Task 8.1 — 分层边界
+
+```text
+Codex / Claude Code / Cursor / DSH / Internal Agent
+        │
+        ▼  厂商专属翻译（在 AER 之外）
+Agent-specific Adapter
+        │
+        ▼  本协议
+Agent Adapter Protocol
+        │
+        ▼
+AER Runtime
+```
+
+Adapter 只做：**Translate / Normalize / Sanitize / Associate**。
+Adapter 不做：Distillation、Verification Policy、Ranking、Promotion、Dataset。
+
+**Adapter 不得直接访问 Repository**，只能走 Runtime API（否则会绕过
+terminal-state guard、单一错误管道与 sequence 分配）。
+
+---
+
+## Task 8.2 — 协议词汇
+
+```text
+AER_ADAPTER_PROTOCOL_VERSION = "1"   # 与包版本无关，独立命名（第 35 节）
+AgentIdentity            provider / agent_name / agent_version / model /
+                         model_version / adapter_name / adapter_version /
+                         session_id / external_run_id
+AdapterCapabilities      tool_events / explicit_adoption_signal / human_feedback /
+                         decision_summary / external_verification / session_linkage /
+                         explicit_utility_signal（默认全部 false）
+AgentAction              kind / name / tool_name / input_summary
+AgentObservation         kind(TOOL_SUCCESS|TOOL_FAILURE|ENVIRONMENT|HUMAN) /
+                         summary / detail
+AgentExecutionEnvelope   event_type / identity / protocol_version /
+                         external_event_id / external_session_id / external_run_id /
+                         external_timestamp / external_sequence / action /
+                         observation / payload / metadata
+AdapterSessionRequest    external_session_id / task / task_type / external_run_id
+AdapterFinishRequest     status(nullable) / reason / metadata
+AgentAdapter(Protocol)   name / protocol_version / identity / capabilities /
+                         start / handle_event / finish
+```
+
+```text
+不要依赖 model 名称判断 Agent 类型（第 3 节）。
+厂商时间戳只作为 external metadata；AER 的 created_at 永远是接收时钟（第 24 节）。
+外部 sequence 原值保留，绝不重写 AER sequence（第 23 节）。
+```
+
+## Task 8.3 — 事件词汇
+
+不新增 EventType。Adapter 事件只能映射到已有语义：
+
+```text
+MODEL_CALL / MODEL_RESULT / TOOL_CALL / TOOL_RESULT /
+ERROR / RECOVERY_START / RECOVERY_RESULT / HUMAN_FEEDBACK
+```
+
+明确**不可**通过协议写入：
+
+```text
+TASK_START / TASK_END   由 open / close session 驱动
+VERIFICATION            只能由 Verification Engine 写入（第 39 节）
+```
+
+`decision_summary` 承载可审计的行动理由摘要；`chain_of_thought` /
+`reasoning` / `scratchpad` 等私有推理字段一律**丢弃并记录**（第 6 节）。
+
+## Task 8.4 — 会话
+
+新增 `adapter_sessions`：`provider + external_session_id` 唯一 → 一个当前 AER Run。
+
+```text
+首次连接              → STARTED，新建 Run
+重连（Run 仍 RUNNING） → RESUMED，复用同一个 Run
+重连（Run 已终态）     → 默认拒绝（AdapterSessionTerminated）
+                         显式 reopen() → REOPENED，新 Run，旧 run id 进 previous_runs
+```
+
+映射持久化，进程重启后仍可恢复（第 50–51 节）。
+
+## Task 8.5 — 幂等
+
+新增 `adapter_events` 账本：`(provider, external_event_id)` 唯一。
+
+```text
+一次厂商事件 = 一个幂等单元
+（一个厂商事件拆成多个 envelope 时，必须携带同一个 external_event_id）
+
+先 claim（applied=false）→ 再 apply → 再 mark_applied
+重复投递 = DUPLICATE，不写任何东西
+没有 external_event_id = 无法幂等（这是文档化的代价，不是猜测）
+```
+
+## Task 8.6 — 外部输入治理
+
+Adapter 输入全部视为 **Untrusted External Data**（第 25–27 节）：
+
+```text
+凭据按值脱敏（Bearer / key=value / URL / PEM / SSH）
+凭据按键名脱敏（api_key / authorization / cookie / token ...）
+私有推理键直接丢弃（不是脱敏）
+单字符串上限 4096；decision_summary 上限 2048；整体 body 上限 16384
+超限一律带显式截断标记，禁止静默截断
+深度上限 8，超出替换为显式 marker
+```
+
+Prompt injection 不靠匹配处理，而是**结构上不可达**：协议里没有任何字段
+能让外部字符串变成 AER 指令（第 26 节）。
+
+## Task 8.7 — 能力声明
+
+```text
+Adapter 声明能观测什么；Runtime 按声明**强制**：
+  tool_events              → 才能写 TOOL_CALL / TOOL_RESULT
+  human_feedback           → 才能写 HUMAN_FEEDBACK
+  explicit_adoption_signal → 才能写任何非 UNKNOWN 的 usage_signal
+  explicit_utility_signal  → 才能写 utility_label
+  external_verification    → 才能提交证据给 verifier
+```
+
+不支持 adoption 的 Adapter 永远只能留下 `UNKNOWN`，**不得推断 ADOPTED**（第 12、47 节）。
+Adapter **不得**因为任务成功就写 `HELPFUL`（第 16、34 节）。
+
+## Task 8.8 — 错误语义
+
+```text
+Agent 自己报错            → ERROR 事件 + ErrorRecord（沿用唯一错误管道）
+Adapter 自己崩溃          → AdapterError（Integration Error）
+                           不改 Run 状态、不写 ERROR 事件、不伪造 Verification
+                           因为那会污染 Distillation 的证据（第 28、48 节）
+```
+
+## Task 8.9 — 本轮明确不做
+
+```text
+Codex / Claude / Cursor / DSH Adapter（M8.1–M8.4，按 hook 完整度排序而非品牌）
+Dataset Export / Preference Dataset / 训练
+Dashboard / FastAPI
+Plugin Marketplace（注册表就是一个 dict）
+重写 M1–M4 的 Event 语义（Adapter 适配 AER，不是反过来）
+```
+
+---
+
+# 11. Milestone 8（原编号，后续执行）— Sanitizer
+
+> 编号说明：本文件原先把 Sanitizer 编为 M8。本轮（round-8）的 M8 是
+> Agent Adapter Protocol，Sanitizer 保留原任务内容但顺延，待真实多 Agent
+> 接入后按需要排期。Adapter 层已经自带一层外部输入治理（见 Task 8.6）。
 
 ## Goal
 
@@ -1726,6 +1944,64 @@ success_count += 1
 [✓] 投影按批提交（D-063）
 ```
 
+---
+
+# 26.1 Milestone 7 — Experience Usage & Effectiveness（已完成）
+
+完成日期：2026-09-20。验收详见 `docs/DEPLOYMENT.md` 第 19 节与
+`docs/DECISIONS.md` D-066..D-074。
+
+```text
+[✓] Usage 存 SQLite，不进 NeuG；NeuG 本轮保持只读（D-066）
+[✓] retrieve() 保持纯读，新增显式 tracked retrieval（D-067）
+[✓] Retrieved / Injected / Adopted / Helpful 四态分离（D-068）
+[✓] usage_signal 必须显式 + 带来源，禁止行为推断（D-069）
+[✓] REUSED 要求注入到非来源 Run；来源 Run 不算 reuse（D-070）
+[✓] observed_success_rate 命名即边界：相关性不是因果（D-071）
+[✓] confidence 确定性、可拆解、按需计算、不写回（D-072）
+[✓] 0 结果也记录 session；query 必须 sanitized（D-073）
+[✓] 不建 Dataset Builder、不做训练、不做 Adapter（D-074）
+```
+
+---
+
+# 26.2 Milestone 8 — Agent Adapter Protocol（已完成）
+
+完成日期：2026-09-20。验收详见 `docs/DEPLOYMENT.md` 第 23 节与
+`docs/DECISIONS.md` D-075..D-083。
+
+```text
+[✓] Core 不认识任何厂商格式；Adapter 只做 Translate/Normalize/Sanitize/Associate（D-075）
+[✓] Adapter 只能走 Runtime API，新增 RunContext.external（D-076）
+[✓] 事件型模型，不做 call/result 配对；外部顺序与时间戳只作元数据（D-077）
+[✓] AER 自己生成内部 ID；外部 ID 永不作为主键（D-078）
+[✓] 幂等靠 adapter_events 账本，先 claim 后 apply（D-079）
+[✓] 外部输入全部不可信：按值/按键脱敏 + 尺寸上限 + 显式截断（D-080）
+[✓] 能力声明被强制执行：不能观测就只能是 UNKNOWN（D-081）
+[✓] Adapter 崩溃是 Integration Error，不改 Run、不伪造 Verification（D-082）
+[✓] 会话映射持久化，terminal 语义显式（D-083）
+[✓] 两个完全不同的假 Agent 产生相同 AER 语义（第 60 节验收）
+```
+
+# 26.3 Next Stage Gate
+
+M8 之后建议顺序：
+
+```text
+M8.1 Codex Adapter
+M8.2 Claude Code Adapter
+M8.3 Cursor Adapter
+M8.4 DSH Adapter
+```
+
+顺序应按**哪个平台能提供最完整可靠的 hooks**决定，不按品牌优先级（第 57 节）。
+
+**不要**从 M8 直接进入 Dataset Builder：本轮只是让多个 Agent 能稳定产生
+**统一 Evidence**；Dataset 还需要 Quality Gate、Safety、Dedup 与
+Holdout separation（第 56 节）。
+
+---
+
 # 27. Next Stage Gate
 
 只有 P0 MVP Accepted 后，才能进入：
@@ -1791,3 +2067,117 @@ Agent Lightning
 如果不能：
 
 **不要在当前 MVP 实现。**
+---
+
+# 10.2 Milestone 8.1 — Codex Adapter（已完成）
+
+完成日期：2026-09-20。验收详见 `docs/CODEX_ADAPTER.md` 与
+`docs/DECISIONS.md` D-085..D-094。
+
+```text
+[✓] 先侦察：读实际安装的 0.155.1，不照文档假设（D-090）
+[✓] hooks 而非 notify；notify 只是 turn 级 fallback（D-085、D-086）
+[✓] 唯一 terminal authority：SessionEnd；Stop 不终止 Run（D-087）
+[✓] SessionStart 无 task 字段 → Run 由第一个 prompt 建立（D-091）
+[✓] 只映射被观测到的两个事件，其余显式 IGNORED（D-092）
+[✓] 未声明结果的 SessionEnd → ABORTED，并记录 codex_outcome_stated（D-093）
+[✓] Codex 自述成功不产生 Verification（D-088）
+[✓] 工具成功不等于 adoption；能力门禁拒绝 ADOPTED（D-089）
+[✓] 幂等：同一 hook 重复投递只写一条（D-079 + 实测 hook 重复触发问题）
+[✓] crash gap：可检测（unapplied_events），不声称 replay（D-094）
+[✓] 真实 payload fixture（3 个捕获）+ contract fixture（3 个，明确标注）
+[✓] scripts/probe_codex_hooks.py：升级 Codex 前的可重复兼容性探针
+```
+
+**未完成并明确记录的缺口**：PreToolUse / PostToolUse / PermissionRequest /
+PreCompact / PostCompact / SubagentStart / SubagentStop / Stop / Interrupt
+九个事件在 exec 模式下未观测到（需要一次真实模型回合）；interactive 模式全部未覆盖
+（需要终端）。详见 `docs/CODEX_ADAPTER.md` 的覆盖矩阵。
+
+---
+
+# 10.3 Milestone 8.1 — Real Codex Tool Coverage（**COMPLETE**）
+
+完成日期：2026-09-20。决策见 `docs/DECISIONS.md` D-095..D-099。
+
+前置条件（provider 可达）在本轮达成：重新登录后 access token 有效（240h），
+用 `gpt-5.6-luna` 在临时 CODEX_HOME + 临时测试仓库中完成了真实模型回合。
+
+```text
+[✓] SessionStart      CAPTURED
+[✓] UserPromptSubmit  CAPTURED
+[✓] PreToolUse        CAPTURED   （tool_name / tool_input / tool_use_id）
+[✓] PostToolUse       CAPTURED   （tool_response 是字符串，无结果字段）
+[✓] SessionEnd        CAPTURED   （reason="other"，正常值）
+[✓] Stop              CAPTURED   （turn 级，带 last_assistant_message，无结果）
+```
+
+真实场景 B（失败 → 修复 → 成功）完整捕获：
+
+```text
+SessionStart → UserPromptSubmit →
+PreToolUse(Bash, python check.py) → PostToolUse(失败输出) →
+PreToolUse(Bash, 查看文件)         → PostToolUse →
+PreToolUse(apply_patch, 修改)      → PostToolUse →
+PreToolUse(Bash, 复跑)             → PostToolUse(成功输出) →
+Stop → SessionEnd
+```
+
+本轮**修正的映射**（依据真实 payload，§6/§7）：
+
+```text
+[✓] PreToolUse ↔ PostToolUse 通过 tool_use_id 1:1 关联 —— linkage available（§8）
+[✓] tool_response 是字符串：删除顶层 exit_code/error/status 检查（死代码）
+[✓] 工具失败不写 ERROR（唯一信号是输出文本，解析文本被 §52 禁止）—— D-097
+[✓] Stop 不终止 Run（turn 级且无结果）—— D-098
+[✓] SessionEnd.reason="other" 是正常值 —— P0 达成，D-093 的保护被证实必需 —— D-099
+[✓] 3 个 contract fixture 全部删除，9 个 captured fixture 入库（MANIFEST 全部标记 captured）
+[✓] fixture 已脱敏：个人绝对路径归一化、transcript 文件名归一化、id 替换为合成值
+```
+
+**遗留限制**：PermissionRequest / PreCompact / PostCompact / SubagentStart / SubagentStop /
+Interrupt 仍未观测；interactive 模式零覆盖；`verified_success` 在当前映射下对 Codex Run
+不可达（因为 Codex 从不声明结果）。
+
+
+---
+
+# 10.4 Milestone 8.1.1 — Outcome Semantics（已完成）
+
+完成日期：2026-09-20。决策见 `docs/DECISIONS.md` D-100。范围只有一件事：
+把"平台没说结果"变成一个 AER 能表达的事实，而不是借用一个错误的状态。
+
+```text
+[✓] RunStatus.INCONCLUSIVE（终态，不声明任何关于工作的东西）
+[✓] Codex SessionEnd(未声明) → INCONCLUSIVE；generic 增加 unknown/inconclusive 词
+[✓] is_verified_success：SUCCESS 或 INCONCLUSIVE + 有 required + 无 required 失败
+[✓] Distillation：INCONCLUSIVE + 已验证 → SUCCESS/RECOVERY
+                  INCONCLUSIVE + 未验证 → 没有 kind，veto（不伪造 FAILURE）
+[✓] 旧语义不变：FAILED / ABORTED / PARTIAL_SUCCESS 仍然永远不是 verified success
+[✓] 删除 metadata.outcome_declared（状态即事实，撤掉第二份表示）
+```
+
+验收（对照本轮 brief 的 Final Acceptance）：
+
+```text
+[✓] INCONCLUSIVE terminal status
+[✓] Codex SessionEnd(other) → INCONCLUSIVE
+[✓] Verification Summary 支持 INCONCLUSIVE + required PASS → verified_success
+[✓] Distillation 正确处理（已验证 → 有 kind；未验证 → 不编造 kind）
+[✓] 旧 SUCCESS / FAILURE / ABORTED 语义不变（有回归测试）
+```
+
+新增测试：summary 4 条、policy 6 条、lifecycle 3 条、effectiveness 2 条、
+Codex 端到端验收 5 条、generic 词表 2 条。
+
+**这一步的意义**：第二个平台只需要回答 `declared SUCCESS / FAILURE / ABORTED / UNKNOWN`
+四个词，"UNKNOWN + verifier PASS 算不算成功"由 AER 统一决定一次。
+M8 的 provider-neutral 闭环因此成立：
+
+```text
+Agent execution → Declared Outcome or INCONCLUSIVE → Independent Verification
+              → Verified Outcome → Experience → Retrieval → Usage
+```
+
+**仍然存在的限制**：Codex 在没有验证路径时产不出经验（因为没有 kind 可写）。
+这是刻意的选择，见 D-100 的"代价"。

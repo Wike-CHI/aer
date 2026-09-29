@@ -17,13 +17,41 @@ from enum import StrEnum
 
 
 class RunStatus(StrEnum):
-    """Lifecycle status of a single :class:`aer.runtime.models.Run`."""
+    """Lifecycle status of a single :class:`aer.runtime.models.Run`.
+
+    Four of the five terminal members are **declarations**: somebody -- the agent, or
+    the platform it runs on -- said how the work ended. The fifth, ``INCONCLUSIVE``,
+    is the absence of a declaration, and it needed its own member because the
+    alternative was to spell "nobody said anything" with one of the four (round-8.1.1,
+    D-100).
+
+    Overloading ``ABORTED`` for that was the specific mistake: ``ABORTED`` means "the
+    agent declared the work abandoned", which drives failure handling everywhere, so an
+    integration that closed a run because a *session* ended was manufacturing a
+    declaration that nobody made. The distinction is not cosmetic -- it decides whether
+    a failed tool call becomes a failure experience.
+
+    * ``RUNNING``          -- not finished.
+    * ``SUCCESS``          -- the agent declared the task complete.
+    * ``PARTIAL_SUCCESS``  -- the agent declared it partly complete.
+    * ``FAILED``           -- the agent declared it failed.
+    * ``ABORTED``          -- the agent declared it abandoned.
+    * ``INCONCLUSIVE``     -- nobody declared anything; the run is over anyway.
+
+    ``INCONCLUSIVE`` is terminal and, unlike the other four, carries no claim about the
+    work at all. It is not a synonym for failure and must never be counted as one. What
+    can still settle such a run is *independent evidence*: a required verification that
+    passed makes it a verified success (see
+    :func:`aer.verification.summary.is_verified_success`), and a required verification
+    that failed makes it a proven failure. Without either, its outcome is simply unknown.
+    """
 
     RUNNING = "RUNNING"
     SUCCESS = "SUCCESS"
     PARTIAL_SUCCESS = "PARTIAL_SUCCESS"
     FAILED = "FAILED"
     ABORTED = "ABORTED"
+    INCONCLUSIVE = "INCONCLUSIVE"
 
 
 class EventType(StrEnum):
@@ -142,6 +170,11 @@ class DistillationTrigger(StrEnum):
     Needed on its own because a run can end without recording any error at all --
     the agent simply gives up -- and that trajectory is exactly what a failure
     experience is for.
+
+    ``INCONCLUSIVE`` is deliberately **not** in that list: it means nobody declared an
+    outcome, which is not the agent saying "this did not work". A missing declaration
+    is not a failure declaration, and reading it as one would put a claim in the store
+    that no participant ever made (round-8.1.1, D-100).
     """
 
     UNVERIFIED_SUCCESS = "UNVERIFIED_SUCCESS"
@@ -189,3 +222,188 @@ class ProjectionAction(StrEnum):
 
     REMOVED = "REMOVED"
     """The store no longer has it, so its projection was deleted."""
+
+
+class UsageRole(StrEnum):
+    """The slot one experience occupied in a retrieval result (Milestone 7).
+
+    Recorded at retrieval time rather than recomputed later from
+    :class:`~aer.runtime.enums.ExperienceKind`, because the retrieval policy is
+    allowed to change: which kind lands where is a *policy* decision, and a report
+    that reclassified history under today's policy would silently rewrite the past
+    (round-7 brief, section 9).
+
+    The three members mirror the three things a result can say. ``GUIDANCE`` is the
+    ``guidance`` list -- the part a caller may act on. ``WARNING`` is a confirmed
+    failure: something that was tried and did **not** work. ``OBSERVATION`` is an
+    unverified record, which is useful precisely because it is labelled as not
+    confirmed. Warnings and observations share one list in
+    :class:`~aer.knowledge.models.RetrievalResult`, but conflating them here would
+    lose the difference between "we know this fails" and "this once happened".
+    """
+
+    GUIDANCE = "GUIDANCE"
+    WARNING = "WARNING"
+    OBSERVATION = "OBSERVATION"
+
+
+class UsageSignal(StrEnum):
+    """Whether an agent actually used a retrieved experience (section 10).
+
+    The whole point of the milestone is that this is **unknown by default**. A
+    retrieval result is a list of candidates; only an explicit signal from someone
+    who saw the agent decide may move a row off ``UNKNOWN``.
+
+    * ``UNKNOWN``   -- no reliable evidence about what the agent did with it. Not a
+      failure: it is the honest state of almost every row.
+    * ``ADOPTED``   -- there is explicit evidence the agent used the experience.
+    * ``IGNORED``   -- the experience demonstrably entered the context and was not
+      used.
+    * ``REJECTED``  -- a human or an agent judged it inapplicable to this task.
+
+    Text similarity and similar tool calls are explicitly **not** signals
+    (section 22): inferring adoption from behaviour is a later, confidence-carrying
+    feature, not something to smuggle into a fact table.
+    """
+
+    UNKNOWN = "UNKNOWN"
+    ADOPTED = "ADOPTED"
+    IGNORED = "IGNORED"
+    REJECTED = "REJECTED"
+
+
+class UsageSignalSource(StrEnum):
+    """Who asserted a :class:`UsageSignal` (section 11).
+
+    Kept separate from the signal because the same claim means different things
+    depending on where it came from, and a later stage has to be able to prefer a
+    human's judgement over an adapter's guess. A signal never travels without its
+    source.
+    """
+
+    AGENT = "AGENT"
+    HUMAN = "HUMAN"
+    ADAPTER = "ADAPTER"
+    EVALUATOR = "EVALUATOR"
+    SYSTEM = "SYSTEM"
+
+
+class UtilityLabel(StrEnum):
+    """Whether an experience helped, once the outcome is known (section 12).
+
+    Deliberately **not** an alias of :class:`UsageSignal`: an agent can adopt an
+    experience that is wrong, so ``ADOPTED`` does not imply ``HELPFUL``. This is the
+    judgement that needs a task outcome and, usually, a human or an evaluator.
+    """
+
+    UNKNOWN = "UNKNOWN"
+    HELPFUL = "HELPFUL"
+    NEUTRAL = "NEUTRAL"
+    HARMFUL = "HARMFUL"
+
+
+class UtilitySource(StrEnum):
+    """Who asserted a :class:`UtilityLabel`.
+
+    ``SYSTEM`` is in the vocabulary but must never be assigned merely because a run
+    ended in ``SUCCESS`` (section 13): the experience may have been ignored while the
+    agent solved the task by itself.
+    """
+
+    HUMAN = "HUMAN"
+    EVALUATOR = "EVALUATOR"
+    AGENT = "AGENT"
+    SYSTEM = "SYSTEM"
+
+
+class SessionAssignment(StrEnum):
+    """Which arm of a future experiment a retrieval session belongs to (section 31).
+
+    Reserved now, unused now. It exists so that the holdout design of section 32 does
+    not require a schema change when it arrives: a session already says whether it
+    was allowed to inject or was held back.
+    """
+
+    NONE = "NONE"
+    """No experiment was running. The value on every session today."""
+
+    TREATMENT = "TREATMENT"
+    """The retrieved experiences could be injected."""
+
+    HOLDOUT = "HOLDOUT"
+    """The retrieved experiences were deliberately withheld, to measure the
+    counterfactual."""
+
+
+class RunOutcome(StrEnum):
+    """The outcome class of a run, as effectiveness statistics need it (section 26).
+
+    Five classes rather than a boolean, because "the task failed" and "nobody ever
+    checked" are different facts and only one of them belongs in a denominator.
+    ``UNVERIFIED`` is explicitly **not** a failure (section 26): counting an
+    unobserved run as a negative outcome would make every experience look worse the
+    less it was measured.
+
+    Precedence when several apply is decided in
+    :func:`aer.usage.effectiveness.classify_outcome`, in one place, with the ordering
+    written down.
+    """
+
+    RUNNING = "RUNNING"
+    """The run has not finished. No outcome exists yet."""
+
+    VERIFIED_SUCCESS = "VERIFIED_SUCCESS"
+    """The agent declared success and the required verifications passed."""
+
+    VERIFIED_FAILURE = "VERIFIED_FAILURE"
+    """An independent verification confirmed the goal was not met."""
+
+    RUN_FAILED = "RUN_FAILED"
+    """The agent declared the run failed, aborted or partly succeeded, and no
+    verification confirmed the failure."""
+
+    UNVERIFIED = "UNVERIFIED"
+    """The run finished without any verification result deciding its outcome."""
+
+
+class AdapterSessionOutcome(StrEnum):
+    """What opening an external Agent session actually did (Milestone 8).
+
+    Three outcomes rather than a boolean, because "I resumed the run you were already
+    in" and "I started a second run for the same external session" are different
+    facts about the relationship between an external Agent and AER's traces. A caller
+    that reconnected and got ``REOPENED`` when it expected ``RESUMED`` has just
+    discovered that its previous episode was already closed -- which is exactly the
+    kind of thing that must not be inferred (round-8 brief, sections 21 and 43).
+    """
+
+    STARTED = "STARTED"
+    """No mapping existed; a new AER run was created for this external session."""
+
+    RESUMED = "RESUMED"
+    """The mapping existed and its run was still ``RUNNING``; that run was reused."""
+
+    REOPENED = "REOPENED"
+    """The mapping existed and its run was already terminal, and the caller explicitly
+    asked for a new episode (``on_terminal="reopen"``). The previous run is kept and
+    recorded, never rewritten."""
+
+
+class AdapterIngestOutcome(StrEnum):
+    """What delivering one external event to AER did (Milestone 8).
+
+    Three outcomes, because "nothing happened" has two very different causes and an
+    integration that cannot tell them apart will mis-diagnose itself: a duplicate
+    delivery means the platform is retrying (working as designed), while a dropped
+    event means the adapter decided this vendor event carries no evidence (also
+    working as designed). Neither is a failure, and neither should look like a write.
+    """
+
+    APPLIED = "APPLIED"
+    """Translated, deduplicated and written to the run."""
+
+    DUPLICATE = "DUPLICATE"
+    """This external event id was already accepted; nothing was written."""
+
+    IGNORED = "IGNORED"
+    """The adapter translated the vendor event into no protocol envelopes."""

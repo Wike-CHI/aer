@@ -27,6 +27,12 @@ from aer.runtime.enums import DistillationTrigger, ExperienceKind, RunStatus
 
 _FROZEN = ConfigDict(extra="forbid", frozen=True)
 
+#: Statuses that mean the agent declared the work was *not* completed.
+#:
+#: ``INCONCLUSIVE`` is deliberately absent: it declares nothing, so it is not evidence
+#: of failure (round-8.1.1, D-100).
+_DECLARED_NON_SUCCESS = frozenset({RunStatus.FAILED, RunStatus.ABORTED, RunStatus.PARTIAL_SUCCESS})
+
 
 class DistillationDecision(BaseModel):
     """Whether to distil, which kind, and why.
@@ -93,6 +99,23 @@ class DistillationPolicy:
                 f"run is still {evidence.run.status.value}; an unfinished run has no outcome",
             )
 
+        if not evidence.outcome_declared and not self._decided_by_verification(evidence):
+            # Nobody declared how this run ended and no required verification decided it
+            # either, so there is no kind to record. The ERROR and RECOVERY triggers are
+            # deliberately not consulted: they say something failed *inside* the run, not
+            # that the task ended unsatisfied, and a ``FAILURE`` experience claims the
+            # latter. Recording one here would turn silence into a claim about the task
+            # (round-8.1 section 13, round-8.1.1 D-100).
+            #
+            # ``explicit_high_value`` does not override this either: forcing the run
+            # through would still leave ``classify_kind`` with no kind to return.
+            return self._veto(
+                evidence,
+                "no outcome was declared for this run and no required verification "
+                "decided one; there is no kind to record, and 'nobody said anything' "
+                "is not 'it failed'",
+            )
+
         triggers: list[DistillationTrigger] = []
         reasons: list[str] = []
 
@@ -112,7 +135,10 @@ class DistillationPolicy:
             triggers.append(DistillationTrigger.VERIFICATION_FAILURE)
             reasons.append(f"{evidence.required_failed} required verification(s) failed")
 
-        if evidence.run.status is not RunStatus.SUCCESS:
+        if evidence.run.status in _DECLARED_NON_SUCCESS:
+            # Only a *declared* non-success is evidence of failure. ``INCONCLUSIVE`` is
+            # handled above and never reaches this branch, because the agent never said
+            # "this did not work" (round-8.1 section 13).
             triggers.append(DistillationTrigger.FAILED_RUN)
             reasons.append(f"run ended {evidence.run.status.value}")
 
@@ -137,6 +163,18 @@ class DistillationPolicy:
             triggers=tuple(triggers),
             reasons=tuple(reasons),
         )
+
+    @staticmethod
+    def _decided_by_verification(evidence: RunEvidence) -> bool:
+        """Whether the recorded verdicts settled this run's outcome by themselves.
+
+        Asked only of a run that declared nothing. A *required* check decides the
+        outcome in one direction or the other -- all of them passed (an established
+        success) or at least one failed (a proven failure). Optional verdicts decide
+        nothing, which is what ``required`` means (Milestone 4): an opinion must not be
+        able to turn silence into a verdict.
+        """
+        return evidence.verified_success or evidence.required_failed > 0
 
     @staticmethod
     def _veto(evidence: RunEvidence, reason: str) -> DistillationDecision:

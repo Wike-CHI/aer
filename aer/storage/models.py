@@ -9,11 +9,20 @@ Realised tables:
 * ``verifications`` -- independent verdicts on a run's outcome (Milestone 4)
 * ``experiences``   -- distilled, reusable knowledge (Milestone 5)
 * ``experience_sources`` -- which runs support an experience (Milestone 5)
+* ``retrieval_sessions`` -- one retrieval, recorded as a fact (Milestone 7)
+* ``experience_usage`` -- one experience offered to one retrieval session (Milestone 7)
+* ``adapter_sessions`` -- an external Agent session mapped to one AER run (Milestone 8)
+* ``adapter_events`` -- the idempotency ledger for external events (Milestone 8)
 
-Still pending from the agreed MVP schema: ``artifacts``, ``experience_usage``,
-``workflows`` and ``dataset_items``. Their SQL is already agreed in the design
-document, so adding them later is additive work; creating empty tables now would
-only add untested surface area.
+Still pending from the agreed MVP schema: ``artifacts``, ``workflows`` and
+``dataset_items``. Their SQL is already agreed in the design document, so adding
+them later is additive work; creating empty tables now would only add untested
+surface area.
+
+Why the usage tables live **here** rather than in the knowledge index: they record
+what an agent did, not what is known. They are behaviour facts, they are queried as
+facts, and the knowledge index is a disposable projection of a different question
+(round-7 brief, sections 3-4).
 
 Storage-format conventions:
 
@@ -370,3 +379,251 @@ class ExperienceSourceRow(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
 
     __table_args__ = (Index("ix_experience_sources_run_id", "run_id"),)
+
+
+class RetrievalSessionRow(Base):
+    """``retrieval_sessions`` table -- one retrieval event (Milestone 7).
+
+    A row here says "a search happened". Whether it found anything is a separate
+    column, and a session with ``result_count = 0`` is kept rather than dropped:
+    "we searched and found nothing" is the fact that tells an operator the knowledge
+    base has a gap, and it is invisible if only successful searches are stored
+    (round-7 brief, section 7).
+
+    ``run_id`` is nullable and ``ON DELETE SET NULL`` rather than ``CASCADE``. A
+    retrieval may precede the run it informs (section 24), and if the run is later
+    deleted the retrieval still happened -- deleting the record of it would be
+    rewriting history to match a cleanup. The row then honestly reads "unattributed",
+    and the effectiveness report counts it as such.
+
+    ``query_text`` holds the **sanitised** query, never a raw prompt (section 6);
+    ``query_fingerprint`` is what groups repeated questions, so grouping survives
+    redaction.
+    """
+
+    __tablename__ = "retrieval_sessions"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+
+    run_id: Mapped[str | None] = mapped_column(
+        Text,
+        ForeignKey("runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    query_text: Mapped[str] = mapped_column(Text, nullable=False)
+    query_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+
+    domain: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mode: Mapped[str] = mapped_column(Text, nullable=False)
+
+    requested_limit: Mapped[int] = mapped_column(Integer, nullable=False)
+    result_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    knowledge_projection_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: Recorded so a later reader can explain *why* this result was the one returned
+    #: (section 59): policy and formatter versions change independently of the data.
+    retrieval_policy_version: Mapped[str] = mapped_column(Text, nullable=False)
+
+    retrieval_duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    #: Reserved for the holdout experiment of section 32. No behaviour today.
+    experiment_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    assignment: Mapped[str] = mapped_column(Text, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_retrieval_sessions_run_id", "run_id"),
+        Index("ix_retrieval_sessions_created_at", "created_at"),
+        Index("ix_retrieval_sessions_query_fingerprint", "query_fingerprint"),
+    )
+
+
+class ExperienceUsageRow(Base):
+    """``experience_usage`` table -- one experience per retrieval session (Milestone 7).
+
+    The composite UNIQUE constraint is the schema's most important statement: the
+    same experience cannot appear twice in one retrieval result. A duplicate would
+    not be "counted twice", it would mean the retriever returned one record in two
+    slots, and the constraint turns that into a loud failure at the write instead of
+    a quietly inflated statistic (section 49).
+
+    Exposure and judgement columns are nullable/defaulted in opposite directions on
+    purpose: ``retrieved_at`` is set the moment the row is created (the row only
+    exists because it was retrieved), while everything downstream of it -- injection,
+    signal, utility -- starts empty. Absence is the default state, and it means
+    "unknown", never "no" (section 10).
+
+    No outcome column. See :class:`~aer.runtime.models.ExperienceUsage` for why.
+    """
+
+    __tablename__ = "experience_usage"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+
+    retrieval_session_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("retrieval_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    experience_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("experiences.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    retrieval_score: Mapped[float] = mapped_column(Float, nullable=False)
+
+    retrieved_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+
+    injected_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    injection_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    injection_chars: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    context_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    formatter_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    usage_signal: Mapped[str] = mapped_column(Text, nullable=False)
+    usage_signal_source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    usage_signal_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+
+    utility_label: Mapped[str] = mapped_column(Text, nullable=False)
+    utility_label_source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    utility_label_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "retrieval_session_id",
+            "experience_id",
+            name="uq_experience_usage_session_experience",
+        ),
+        Index("ix_experience_usage_experience_id", "experience_id"),
+        Index("ix_experience_usage_retrieval_session_id", "retrieval_session_id"),
+        Index("ix_experience_usage_injected_at", "injected_at"),
+        Index("ix_experience_usage_usage_signal", "usage_signal"),
+    )
+
+
+class AdapterSessionRow(Base):
+    """``adapter_sessions`` table -- external Agent session to AER run (Milestone 8).
+
+    Persisted rather than held in memory because the whole point of the table is to
+    survive the Agent process restarting: a hook that reconnects must find the run it
+    was already reporting into, not open a second trace for the same work (round-8
+    brief, sections 20-21 and 51).
+
+    The uniqueness key is ``(provider, external_session_id)``. A session id belongs
+    to the vendor's namespace, so the vendor -- not the adapter implementation -- is
+    what makes it unique; two adapters aimed at the same provider then cannot each
+    claim the same external session.
+
+    ``aer_run_id`` cascades on delete: a mapping to a run that no longer exists has
+    nothing left to resume. The external ids are never primary keys (section 17);
+    AER mints its own.
+    """
+
+    __tablename__ = "adapter_sessions"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    external_session_id: Mapped[str] = mapped_column(Text, nullable=False)
+
+    adapter_name: Mapped[str] = mapped_column(Text, nullable=False)
+    external_run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    aer_run_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    protocol_version: Mapped[str] = mapped_column(Text, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "external_session_id",
+            name="uq_adapter_sessions_external",
+        ),
+        Index("ix_adapter_sessions_aer_run_id", "aer_run_id"),
+        Index("ix_adapter_sessions_adapter_name", "adapter_name"),
+    )
+
+
+class AdapterEventRow(Base):
+    """``adapter_events`` table -- the idempotency ledger (Milestone 8).
+
+    One row per **accepted** external event, keyed by ``(provider,
+    external_event_id)``. The unique constraint is the mechanism behind "a retried
+    hook does not produce a second AER event" (sections 18-19): a duplicate delivery
+    finds the existing row and is reported as a duplicate instead of being applied.
+
+    A separate table rather than a column on ``events``: the core event table carries
+    the trace's history, and the trace must not grow a column whose meaning is "how a
+    particular vendor numbered this" (section 19's warning, and section 53's rule that
+    M8 does not rewrite M1-M4 event semantics). It also keeps the ledger's own
+    metadata -- which adapter accepted the event, when the vendor says it happened --
+    from looking like part of the run.
+
+    ``external_sequence`` / ``external_timestamp`` are the vendor's own ordering,
+    stored beside AER's arrival-order ``sequence`` rather than replacing it
+    (section 23).
+    """
+
+    __tablename__ = "adapter_events"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    external_event_id: Mapped[str] = mapped_column(Text, nullable=False)
+
+    adapter_name: Mapped[str] = mapped_column(Text, nullable=False)
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+
+    aer_run_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    #: The single AER event this external event became, when there is one.
+    #: ``ON DELETE SET NULL`` because pruning an event must not invalidate the
+    #: ledger's memory that the external event was already handled.
+    aer_event_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("events.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    #: Set after the ledger row is claimed, so a row that exists but was never
+    #: finished applying is distinguishable from one that was. Claiming first is what
+    #: makes duplicate delivery impossible; losing an event to a crash between claim
+    #: and apply is the trade, and it is visible here rather than silent.
+    applied: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+    external_sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    external_timestamp: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "external_event_id",
+            name="uq_adapter_events_external",
+        ),
+        Index("ix_adapter_events_aer_run_id", "aer_run_id"),
+        Index("ix_adapter_events_aer_event_id", "aer_event_id"),
+    )

@@ -63,6 +63,7 @@ from typing import TYPE_CHECKING
 
 from aer.exceptions import RunStateError
 from aer.runtime.enums import EventType, RunStatus
+from aer.runtime.external import ExternalEventRecorder
 from aer.runtime.hooks import RecoveryContext, ToolContext
 from aer.runtime.models import ErrorRecord, Event, Experience, Run, VerificationRecord
 from aer.runtime.sanitization import format_exception, redact
@@ -74,12 +75,18 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle guard for type checking onl
     from aer.verification.summary import VerificationSummary
 
 #: Statuses that may terminate a run. ``RUNNING`` is deliberately excluded.
+#:
+#: ``INCONCLUSIVE`` is here because the run really is over: a session ended, a process
+#: vanished. Leaving it ``RUNNING`` would be the one certainly-wrong answer, since no
+#: further signal can ever arrive. What it does not do is claim anything about the work
+#: (see :class:`~aer.runtime.enums.RunStatus`).
 _TERMINAL_STATUSES = frozenset(
     {
         RunStatus.SUCCESS,
         RunStatus.PARTIAL_SUCCESS,
         RunStatus.FAILED,
         RunStatus.ABORTED,
+        RunStatus.INCONCLUSIVE,
     }
 )
 
@@ -306,27 +313,59 @@ class RunContext:
         metadata: Mapping[str, object] | None,
         system: bool = False,
     ) -> ErrorRecord:
-        """The one and only error pipeline.
-
-        Writes ``ERROR`` first, then the record that points back at it, so an
-        ErrorRecord always has its event (round-3 brief, section 12).
+        """Record a **Python** failure: the one and only error pipeline.
 
         ``system`` selects the append path: ``False`` (= the agent reporting its own
         failure) obeys the terminal guard, ``True`` (= the runtime reporting a
         verifier crash) does not. Both paths allocate the sequence through the same
         repository call, so the trace stays contiguous either way.
+
+        Everything a Python exception can say about itself is derived here, and the
+        resulting primitives go through :meth:`_record_failure` -- which is also what
+        an *externally reported* failure uses. There is still exactly one place where
+        a failure becomes an ``ERROR`` event plus an ``ErrorRecord``.
         """
         exc_type = type(exc)
-        error_type = f"{exc_type.__module__}.{exc_type.__qualname__}"
-        # Both the message and the traceback are redacted: a credential leaks just
-        # as easily through `str(exc)` (e.g. from a failing HTTP call) as through
-        # the stack. Full-payload sanitisation is the later Sanitizer milestone.
-        error_message = redact(str(exc) or repr(exc))
-        stack_trace = format_exception(exc)
+        return self._record_failure(
+            error_type=f"{exc_type.__module__}.{exc_type.__qualname__}",
+            # Both the message and the traceback are redacted: a credential leaks just
+            # as easily through `str(exc)` (e.g. from a failing HTTP call) as through
+            # the stack. Full-payload sanitisation is the later Sanitizer milestone.
+            error_message=redact(str(exc) or repr(exc)),
+            stack_trace=format_exception(exc),
+            recoverable=recoverable,
+            metadata=metadata,
+            system=system,
+        )
+
+    def _record_failure(
+        self,
+        *,
+        error_type: str,
+        error_message: str,
+        stack_trace: str | None,
+        recoverable: bool,
+        metadata: Mapping[str, object] | None,
+        system: bool = False,
+    ) -> ErrorRecord:
+        """Record a failure from primitives, writing ``ERROR`` then the record.
+
+        The primitive form exists for failures AER did not observe as a Python
+        exception: an Agent reporting a failure over the adapter protocol has a type
+        and a message but no traceback of *ours*, and fabricating one from the
+        adapter's own stack would put AER's frames in an agent's trace. An absent
+        ``stack_trace`` therefore means "the source had none", not "it was dropped"
+        (round-8 brief, section 28).
+
+        Runtime-internal API, reaching the adapter layer through
+        :class:`~aer.runtime.external.ExternalEventRecorder`.
+        """
+        message = redact(error_message)
+        trace = None if stack_trace is None else redact(stack_trace)
         meta = to_json_object(metadata)
         payload = {
             "error_type": error_type,
-            "error_message": error_message,
+            "error_message": message,
             "recoverable": recoverable,
         }
 
@@ -340,8 +379,8 @@ class RunContext:
                 run_id=self._run.id,
                 event_id=event.id,
                 error_type=error_type,
-                error_message=error_message,
-                stack_trace=stack_trace,
+                error_message=message,
+                stack_trace=trace,
                 recoverable=recoverable,
                 metadata=meta,
             )
@@ -391,6 +430,36 @@ class RunContext:
                 metadata=to_json_object(metadata),
             )
         )
+
+    # -- externally sourced events -----------------------------------------
+
+    def external(self, *, source: str) -> ExternalEventRecorder:
+        """Open the SDK for recording events that happened outside this process.
+
+        The adapter-facing counterpart of :meth:`emit` and friends, and the only door
+        an Agent integration is allowed to use. It records through the same sequence
+        allocation, the same terminal-state guard and the same error pipeline as the
+        in-process SDK; what it adds is the shape external events actually have -- a
+        failure described rather than raised, a recovery whose start and end arrive as
+        separate deliveries, and an observation that may legitimately arrive after the
+        agent stopped (round-8 brief, section 10).
+
+        Args:
+            source: Who is reporting, e.g. ``"adapter:aer-generic"``. Required, and
+                written onto everything the recorder produces, because an event whose
+                origin nobody recorded cannot be interpreted later.
+
+        Returns:
+            A recorder bound to this run and this source. Stateless, so one can be
+            created per delivery without cost.
+
+        Example::
+
+            recorder = run.external(source="adapter:aer-generic")
+            recorder.event(EventType.TOOL_CALL, input={"tool": "shell"})
+            recorder.failure(error_type="shell.NonZeroExit", message="pytest failed")
+        """
+        return ExternalEventRecorder(self, source=source)
 
     # -- verification ------------------------------------------------------
 

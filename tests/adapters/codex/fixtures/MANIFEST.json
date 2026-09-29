@@ -1,0 +1,54 @@
+{
+  "codex_version": "0.155.1",
+  "captured_on": "2026-09-20",
+  "captured_with": "scripts/probe_codex_hooks.py, exec mode, --dangerously-bypass-hook-trust, sandbox_mode=danger-full-access, model gpt-5.6-luna",
+  "sanitisation": "Absolute personal paths were replaced with neutral ones (C:\\codex-home, C:\\work\\...), transcript filenames were normalised, and session/turn/tool identifiers were replaced with stable synthetic ids. Field names, value types and every structural detail are exactly what Codex sent. No credential, cookie or private content was captured; the prompts used were written for this probe.",
+  "note": "Every fixture here is `captured`: a real Codex payload, sanitised as above. The earlier `contract` fixtures were deleted once real payloads arrived (round-8.1 completion brief section 6). A fixture marked `contract` would mean a hand-written payload, and a test asserts that none exists.",
+  "fixtures": {
+    "exec_session_start.json": {
+      "event": "SessionStart",
+      "provenance": "captured",
+      "note": "Carries no task or prompt field, which is why the run is not opened here (D-091)."
+    },
+    "exec_user_prompt_submit.json": {
+      "event": "UserPromptSubmit",
+      "provenance": "captured",
+      "note": "The first payload that says what was asked, and therefore the one that opens the run."
+    },
+    "exec_pre_tool_use_bash.json": {
+      "event": "PreToolUse",
+      "provenance": "captured",
+      "note": "tool_name=Bash, tool_input={command}, and tool_use_id present -- the correlation section 8 asked about."
+    },
+    "exec_pre_tool_use_apply_patch.json": {
+      "event": "PreToolUse",
+      "provenance": "captured",
+      "note": "A second tool, showing tool_input is tool-specific rather than always a command."
+    },
+    "exec_post_tool_use_bash_success.json": {
+      "event": "PostToolUse",
+      "provenance": "captured",
+      "note": "tool_response is a plain string (command stdout). No exit_code, no success and no error field exists anywhere in the payload."
+    },
+    "exec_post_tool_use_bash_failure.json": {
+      "event": "PostToolUse",
+      "provenance": "captured",
+      "note": "A command that exited non-zero. Its only signal is the word Traceback inside tool_response, which AER deliberately does not parse (D-097)."
+    },
+    "exec_post_tool_use_apply_patch_patch.json": {
+      "event": "PostToolUse",
+      "provenance": "captured",
+      "note": "apply_patch embeds 'Exit code: 0' inside its output text -- a tool-specific convention, not a protocol field. Observed and deliberately not parsed."
+    },
+    "exec_stop.json": {
+      "event": "Stop",
+      "provenance": "captured",
+      "note": "Turn level: carries turn_id, stop_hook_active and last_assistant_message, and no outcome. Fired before SessionEnd (D-098)."
+    },
+    "exec_session_end.json": {
+      "event": "SessionEnd",
+      "provenance": "captured",
+      "note": "reason=other on a session whose turn completed and whose tool call succeeded. 'other' is therefore the normal value, not a failure indicator (D-099)."
+    }
+  }
+}

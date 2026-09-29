@@ -30,30 +30,38 @@ from aer.storage.migrations import (
     upgrade_to_head,
 )
 from aer.storage.models import (
+    AdapterEventRow,
+    AdapterSessionRow,
     Base,
     ErrorRow,
     EventRow,
     ExperienceRow,
     ExperienceSourceRow,
+    ExperienceUsageRow,
     RecoveryRow,
+    RetrievalSessionRow,
     RunRow,
     VerificationRow,
 )
 
 EXPECTED_TABLES = {
+    "adapter_events",
+    "adapter_sessions",
     "alembic_version",
     "errors",
     "events",
     "experience_sources",
+    "experience_usage",
     "experiences",
     "recoveries",
+    "retrieval_sessions",
     "runs",
     "verifications",
 }
 
 #: The newest revision. Pinned so that adding one is a conscious edit rather than a
 #: silently passing test.
-HEAD_REVISION = "0004"
+HEAD_REVISION = "0006"
 
 
 def read_schema(db_path: Path) -> dict[str, str]:
@@ -345,6 +353,240 @@ class TestUpgradeFromThePreviousRevision:
         assert stored == (0, 1, "found 0 <h1>, expected 1")
 
 
+class TestUpgradeFromMilestoneSix:
+    """Revision 0005 must land on a database that is already at 0004.
+
+    The Milestone 7 production path. A live store already holds distilled
+    experiences, and after the upgrade it must still hold exactly those, with two
+    empty tables beside them. "Empty" is the expected state rather than a symptom: a
+    real deployment has recorded no usage yet, because nothing has retrieved through
+    the tracked API until the new code runs (round-7 brief, sections 76-77).
+    """
+
+    @staticmethod
+    def build_milestone_seven_predecessor(path: Path) -> None:
+        """Migrate to ``0004`` and write one run, one event, one experience, one link."""
+        command.upgrade(alembic_config(path), "0004")
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                "INSERT INTO runs "
+                "(id, task_description, status, started_at, metadata_json) "
+                "VALUES ('run-m6', 'milestone six task', 'SUCCESS', "
+                "'2026-09-18 09:00:00.000000', '{}')"
+            )
+            connection.execute(
+                "INSERT INTO events (id, run_id, sequence, event_type, created_at) "
+                "VALUES (1, 'run-m6', 1, 'TASK_START', '2026-09-18 09:00:00.000000')"
+            )
+            connection.execute(
+                "INSERT INTO experiences "
+                "(id, kind, domain, title, problem, status, confidence, generalizable, "
+                " outcome_verified, dedup_key, created_at, updated_at, metadata_json) "
+                "VALUES ('exp-m6', 'RECOVERY', 'wordpress', 'REST API 403', "
+                "'403 on page update', 'VERIFIED', 0.0, 1, 1, 'RECOVERY|wordpress|403', "
+                "'2026-09-18 09:01:00.000000', '2026-09-18 09:01:00.000000', '{}')"
+            )
+            connection.execute(
+                "INSERT INTO experience_sources (experience_id, run_id, created_at) "
+                "VALUES ('exp-m6', 'run-m6', '2026-09-18 09:01:00.000000')"
+            )
+            connection.commit()
+
+    def test_the_database_starts_at_the_previous_revision(self, tmp_path: Path) -> None:
+        db = tmp_path / "m6.db"
+        self.build_milestone_seven_predecessor(db)
+
+        assert current_revision(db) == "0004"
+        assert table_names(db) == {
+            "alembic_version",
+            "errors",
+            "events",
+            "experience_sources",
+            "experiences",
+            "recoveries",
+            "runs",
+            "verifications",
+        }
+
+    def test_upgrading_reaches_head_in_place(self, tmp_path: Path) -> None:
+        db = tmp_path / "m6-upgrade.db"
+        self.build_milestone_seven_predecessor(db)
+
+        upgrade_to_head(db)
+
+        assert current_revision(db) == head_revision() == HEAD_REVISION
+        assert table_names(db) == EXPECTED_TABLES
+
+    def test_experiences_survive_and_the_new_tables_arrive_empty(self, tmp_path: Path) -> None:
+        db = tmp_path / "m6-data.db"
+        self.build_milestone_seven_predecessor(db)
+
+        upgrade_to_head(db)
+
+        with sqlite3.connect(db) as connection:
+            experience = connection.execute(
+                "SELECT kind, status, outcome_verified, dedup_key "
+                "FROM experiences WHERE id = 'exp-m6'"
+            ).fetchone()
+            links = connection.execute(
+                "SELECT experience_id, run_id FROM experience_sources"
+            ).fetchall()
+            sessions = connection.execute("SELECT COUNT(*) FROM retrieval_sessions").fetchone()
+            usage = connection.execute("SELECT COUNT(*) FROM experience_usage").fetchone()
+
+        assert experience == ("RECOVERY", "VERIFIED", 1, "RECOVERY|wordpress|403")
+        assert links == [("exp-m6", "run-m6")]
+        assert sessions[0] == 0
+        assert usage[0] == 0
+
+    def test_usage_can_be_recorded_against_a_pre_existing_experience(self, tmp_path: Path) -> None:
+        """The new tables must be usable against rows the migration did not create."""
+        db = tmp_path / "m6-usable.db"
+        self.build_milestone_seven_predecessor(db)
+        upgrade_to_head(db)
+
+        with sqlite3.connect(db) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO retrieval_sessions "
+                "(id, run_id, query_text, query_fingerprint, domain, mode, "
+                " requested_limit, result_count, knowledge_projection_version, "
+                " retrieval_policy_version, retrieval_duration_ms, assignment, created_at) "
+                "VALUES ('sess-1', 'run-m6', 'rest api 403', 'fp', 'wordpress', 'GUIDANCE', "
+                "3, 1, 1, '1', 12, 'NONE', '2026-09-20 09:00:00.000000')"
+            )
+            connection.execute(
+                "INSERT INTO experience_usage "
+                "(id, retrieval_session_id, experience_id, rank, role, retrieval_score, "
+                " retrieved_at, usage_signal, utility_label, created_at, updated_at) "
+                "VALUES ('use-1', 'sess-1', 'exp-m6', 1, 'GUIDANCE', 0.8, "
+                "'2026-09-20 09:00:00.000000', 'UNKNOWN', 'UNKNOWN', "
+                "'2026-09-20 09:00:00.000000', '2026-09-20 09:00:00.000000')"
+            )
+            connection.commit()
+            stored = connection.execute(
+                "SELECT experience_id, usage_signal FROM experience_usage WHERE id = 'use-1'"
+            ).fetchone()
+
+        assert stored == ("exp-m6", "UNKNOWN")
+
+
+class TestUpgradeFromMilestoneSeven:
+    """Revision 0006 must land on a database that is already at 0005.
+
+    The Milestone 8 production path. A live store already holds verification verdicts
+    and usage rows; after the upgrade it must still hold exactly those, with the two
+    adapter tables empty beside them. Empty is correct rather than suspicious: a
+    deployment that has not yet wired an Agent integration has no external sessions and
+    has accepted no external events (round-8 brief, sections 52 and 59).
+    """
+
+    @staticmethod
+    def build_milestone_eight_predecessor(path: Path) -> None:
+        """Migrate to ``0005`` and write one run, one experience, one usage row."""
+        command.upgrade(alembic_config(path), "0005")
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                "INSERT INTO runs "
+                "(id, task_description, status, started_at, metadata_json) "
+                "VALUES ('run-m7', 'milestone seven task', 'SUCCESS', "
+                "'2026-09-20 09:00:00.000000', '{}')"
+            )
+            connection.execute(
+                "INSERT INTO events (id, run_id, sequence, event_type, created_at) "
+                "VALUES (1, 'run-m7', 1, 'TASK_START', '2026-09-20 09:00:00.000000')"
+            )
+            connection.execute(
+                "INSERT INTO experiences "
+                "(id, kind, domain, title, problem, status, confidence, generalizable, "
+                " outcome_verified, dedup_key, created_at, updated_at, metadata_json) "
+                "VALUES ('exp-m7', 'RECOVERY', 'wordpress', '403', '403 on update', "
+                "'VERIFIED', 0.0, 1, 1, 'RECOVERY|wordpress|403', "
+                "'2026-09-20 09:01:00.000000', '2026-09-20 09:01:00.000000', '{}')"
+            )
+            connection.execute(
+                "INSERT INTO retrieval_sessions "
+                "(id, run_id, query_text, query_fingerprint, domain, mode, "
+                " requested_limit, result_count, knowledge_projection_version, "
+                " retrieval_policy_version, retrieval_duration_ms, assignment, created_at) "
+                "VALUES ('sess-m7', 'run-m7', 'rest api 403', 'fp-m7', 'wordpress', "
+                "'GUIDANCE', 3, 1, 1, '1', 12, 'NONE', '2026-09-20 09:02:00.000000')"
+            )
+            connection.execute(
+                "INSERT INTO experience_usage "
+                "(id, retrieval_session_id, experience_id, rank, role, retrieval_score, "
+                " retrieved_at, usage_signal, utility_label, created_at, updated_at) "
+                "VALUES ('use-m7', 'sess-m7', 'exp-m7', 1, 'GUIDANCE', 0.8, "
+                "'2026-09-20 09:02:00.000000', 'ADOPTED', 'HELPFUL', "
+                "'2026-09-20 09:02:00.000000', '2026-09-20 09:02:00.000000')"
+            )
+            connection.commit()
+
+    def test_the_database_starts_at_the_previous_revision(self, tmp_path: Path) -> None:
+        db = tmp_path / "m7.db"
+        self.build_milestone_eight_predecessor(db)
+
+        assert current_revision(db) == "0005"
+        assert "adapter_sessions" not in table_names(db)
+        assert "adapter_events" not in table_names(db)
+
+    def test_upgrading_reaches_head_in_place(self, tmp_path: Path) -> None:
+        db = tmp_path / "m7-upgrade.db"
+        self.build_milestone_eight_predecessor(db)
+
+        upgrade_to_head(db)
+
+        assert current_revision(db) == head_revision() == HEAD_REVISION
+        assert table_names(db) == EXPECTED_TABLES
+
+    def test_usage_survives_and_the_adapter_tables_arrive_empty(self, tmp_path: Path) -> None:
+        db = tmp_path / "m7-data.db"
+        self.build_milestone_eight_predecessor(db)
+
+        upgrade_to_head(db)
+
+        with sqlite3.connect(db) as connection:
+            usage = connection.execute(
+                "SELECT experience_id, usage_signal, utility_label "
+                "FROM experience_usage WHERE id = 'use-m7'"
+            ).fetchone()
+            sessions = connection.execute("SELECT COUNT(*) FROM adapter_sessions").fetchone()
+            events = connection.execute("SELECT COUNT(*) FROM adapter_events").fetchone()
+
+        assert usage == ("exp-m7", "ADOPTED", "HELPFUL")
+        assert sessions[0] == 0
+        assert events[0] == 0
+
+    def test_an_adapter_session_can_be_recorded_after_the_upgrade(self, tmp_path: Path) -> None:
+        """The new tables have to be usable against runs the migration did not create."""
+        db = tmp_path / "m7-usable.db"
+        self.build_milestone_eight_predecessor(db)
+        upgrade_to_head(db)
+
+        with sqlite3.connect(db) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO adapter_sessions "
+                "(id, provider, external_session_id, adapter_name, aer_run_id, "
+                " protocol_version, created_at, updated_at) "
+                "VALUES ('as-1', 'openai', 'conv-1', 'aer-codex', 'run-m7', '1', "
+                "'2026-09-20 10:00:00.000000', '2026-09-20 10:00:00.000000')"
+            )
+            connection.execute(
+                "INSERT INTO adapter_events "
+                "(id, provider, external_event_id, adapter_name, event_type, aer_run_id, "
+                " applied, created_at) "
+                "VALUES ('ae-1', 'openai', 'evt-1', 'aer-codex', 'TOOL_CALL', 'run-m7', "
+                " 1, '2026-09-20 10:00:01.000000')"
+            )
+            connection.commit()
+            stored = connection.execute(
+                "SELECT adapter_name, event_type, applied FROM adapter_events"
+            ).fetchone()
+
+        assert stored == ("aer-codex", "TOOL_CALL", 1)
+
+
 class TestSchemaParity:
     def test_migrated_schema_matches_the_orm_metadata(self, tmp_path: Path) -> None:
         """Models and revisions must describe the same database.
@@ -390,6 +632,41 @@ class TestSchemaParity:
         assert "ON DELETE SET NULL" in schema["errors"]
         assert "ON DELETE SET NULL" in schema["recoveries"]
         assert "ON DELETE SET NULL" in schema["verifications"]
+        assert "ON DELETE CASCADE" in schema["experience_usage"]
+        # A retrieval outlives the run it informed: deleting the run must not delete
+        # the evidence that a search happened (round-7 brief, section 24).
+        assert "ON DELETE SET NULL" in schema["retrieval_sessions"]
+
+    def test_the_adapter_keys_survive_generation(self, tmp_path: Path) -> None:
+        """Both adapter constraints are the mechanism behind a stated guarantee."""
+        db = tmp_path / "adapter-keys.db"
+        upgrade_to_head(db)
+        schema = read_schema(db)
+
+        # A retried hook cannot produce a second AER event (section 18).
+        assert "UNIQUE (provider, external_event_id)" in schema["adapter_events"]
+        # A reconnecting Agent resumes the run it was reporting into (section 21).
+        assert "UNIQUE (provider, external_session_id)" in schema["adapter_sessions"]
+
+    def test_the_ledger_keeps_its_memory_when_an_event_is_pruned(self, tmp_path: Path) -> None:
+        """``SET NULL``, not ``CASCADE``: forgetting the trace must not re-open dedup."""
+        db = tmp_path / "adapter-event-fk.db"
+        upgrade_to_head(db)
+
+        assert "ON DELETE CASCADE" in read_schema(db)["adapter_sessions"]
+        assert "ON DELETE SET NULL" in read_schema(db)["adapter_events"]
+
+    def test_the_usage_uniqueness_survives_generation(self, tmp_path: Path) -> None:
+        """One experience appears at most once in one retrieval result.
+
+        The composite UNIQUE is what turns "the retriever returned the same record
+        twice" into a loud failure instead of a doubled statistic (section 49), so it
+        is asserted on the generated schema rather than trusted to the model.
+        """
+        db = tmp_path / "usage-unique.db"
+        upgrade_to_head(db)
+
+        assert "UNIQUE (retrieval_session_id, experience_id)" in read_schema(db)["experience_usage"]
 
     def test_the_experience_source_key_survives_generation(self, tmp_path: Path) -> None:
         """The composite key is what makes a duplicate link impossible."""
@@ -426,6 +703,10 @@ class TestSchemaParity:
             "verifications",
             "experiences",
             "experience_sources",
+            "retrieval_sessions",
+            "experience_usage",
+            "adapter_sessions",
+            "adapter_events",
         }
         assert table_names(db) == EXPECTED_TABLES
         assert ErrorRow.__tablename__ == "errors"
@@ -433,3 +714,7 @@ class TestSchemaParity:
         assert VerificationRow.__tablename__ == "verifications"
         assert ExperienceRow.__tablename__ == "experiences"
         assert ExperienceSourceRow.__tablename__ == "experience_sources"
+        assert RetrievalSessionRow.__tablename__ == "retrieval_sessions"
+        assert ExperienceUsageRow.__tablename__ == "experience_usage"
+        assert AdapterSessionRow.__tablename__ == "adapter_sessions"
+        assert AdapterEventRow.__tablename__ == "adapter_events"

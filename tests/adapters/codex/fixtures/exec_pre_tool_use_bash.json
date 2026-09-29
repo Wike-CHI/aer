@@ -1,0 +1,14 @@
+{
+  "session_id": "session-0001",
+  "turn_id": "turn-0002",
+  "transcript_path": "C:\\codex-home\\sessions\\2026\\09\\20\\rollout-PLACEHOLDER.jsonl",
+  "cwd": "C:\\work\\demo-repo",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-5.6-luna",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "git status"
+  },
+  "tool_use_id": "tool-0003"
+}

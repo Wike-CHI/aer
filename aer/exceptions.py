@@ -162,3 +162,81 @@ class KnowledgeSchemaError(KnowledgeError):
     rebuildable from SQLite, so the answer to a schema mismatch is *rebuild*,
     not migrate (round-6 brief, section 77).
     """
+
+
+class UsageError(AERError):
+    """Base class for Experience-usage failures (Milestone 7).
+
+    A separate family from :class:`StorageError` and from :class:`KnowledgeError`
+    because the three can fail independently: retrieval may succeed while the usage
+    write fails, and the usage store may be perfectly healthy while the knowledge
+    index is unreachable. Collapsing them would let a caller catch "something went
+    wrong" and treat an untracked retrieval as a tracked one.
+    """
+
+
+class UsageTrackingError(UsageError):
+    """Recording what happened to a retrieval failed, or was asked to do something
+    inconsistent.
+
+    Two situations share this type, and both need to be loud rather than quietly
+    absorbed:
+
+    * **the tracking write failed** after retrieval succeeded. The caller must not
+      be told a retrieval was tracked when it was not (round-7 brief, section 51).
+      The underlying :class:`StorageError` is preserved as ``__cause__``;
+    * **the requested change contradicts what is already recorded** -- a signal that
+      flips an established decision, an injection of an experience that was never in
+      the session's result, a session re-pointed at a different run (sections 20, 52
+      and 53). A silent overwrite here would corrupt the evidence base that a later
+      dataset builder has to trust.
+    """
+
+
+class AdapterError(AERError):
+    """Base class for Agent-adapter failures (Milestone 8).
+
+    A family of its own because an adapter failure is neither an agent failure nor a
+    storage failure: the run it was reporting into is untouched, and the caller needs
+    to know that the *integration* broke, not the task (round-8 brief, section 28).
+    """
+
+
+class AdapterProtocolError(AdapterError):
+    """An envelope did not conform to the adapter protocol.
+
+    Raised for a missing required field, an unknown protocol version or a malformed
+    payload. The cause is always a mismatch between what an adapter sends and what
+    this build accepts, so it is reported as itself rather than being coerced into
+    something workable (section 36: never best-effort guess).
+    """
+
+
+class UnsupportedAdapterEvent(AdapterProtocolError):
+    """The event type is outside the adapter vocabulary.
+
+    AER's event vocabulary is stable and small on purpose. An adapter that wants to
+    record something AER has no event for must say so, rather than have its event
+    silently dropped or squeezed into a neighbouring type (section 5).
+    """
+
+
+class AdapterCapabilityError(AdapterError):
+    """An adapter tried to record something it declared it cannot observe.
+
+    The capability declaration exists so the system never pretends a platform
+    provides information it does not (sections 11-12). Recording an adoption signal
+    from an adapter that declared ``explicit_adoption_signal = False`` would turn an
+    honest ``UNKNOWN`` into a fabricated ``ADOPTED``, so it is refused here instead.
+    """
+
+
+class AdapterSessionTerminated(AdapterError):
+    """An external session was reopened after its AER run had already finished.
+
+    Explicit rather than implicit (section 43): reconnecting may mean "resume" or "a
+    new episode of work", and only the caller knows which. Silently starting a second
+    run would split one external conversation across two traces; silently reusing the
+    finished run would forbid the second episode entirely. Raising forces the choice,
+    and ``on_terminal="reopen"`` expresses it.
+    """

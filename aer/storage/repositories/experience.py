@@ -175,6 +175,24 @@ class ExperienceRepository:
             experiences = [_to_domain(row) for row in session.execute(statement).scalars().all()]
         return experiences
 
+    def get_many(self, experience_ids: Sequence[str]) -> dict[str, Experience]:
+        """Load several experiences by id in one query, keyed by id.
+
+        Added for the Milestone 7 analytics, which needs the record behind every id
+        in a report -- and asking per id would be the N+1 that round-7 brief section
+        56 rules out. Ids that do not exist are simply absent, so a caller that needs
+        to distinguish "missing" from "present" can use ``len()``.
+        """
+        if not experience_ids:
+            return {}
+        experiences: dict[str, Experience]
+        with self._database.session("load experiences by id") as session:
+            statement = select(ExperienceRow).where(ExperienceRow.id.in_(list(experience_ids)))
+            experiences = {
+                row.id: _to_domain(row) for row in session.execute(statement).scalars().all()
+            }
+        return experiences
+
 
 class ExperienceSourceRepository:
     """Read/write access to the ``experience_sources`` link table."""

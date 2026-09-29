@@ -29,6 +29,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from aer.runtime.enums import RunStatus
 from aer.runtime.models import VerificationRecord
 
+#: Statuses a passing verification can promote to a verified success.
+#:
+#: ``SUCCESS`` is a declaration the verification confirms; ``INCONCLUSIVE`` is the
+#: absence of a declaration, which a verification *replaces*. Everything else is a
+#: declaration that the work was not completed, and no passing check changes that.
+_SUCCESS_STATUSES = frozenset({RunStatus.SUCCESS, RunStatus.INCONCLUSIVE})
+
 
 class VerificationSummary(BaseModel):
     """How the verdicts recorded for one run add up.
@@ -63,15 +70,36 @@ class VerificationSummary(BaseModel):
         cls, run_id: str, records: Sequence[VerificationRecord]
     ) -> VerificationSummary:
         """Aggregate ``records`` for ``run_id``."""
-        total = len(records)
-        passed = sum(1 for record in records if record.passed)
-        failed = total - passed
-
         required = [record for record in records if record.required]
-        required_total = len(required)
-        required_passed = sum(1 for record in required if record.passed)
-        required_failed = required_total - required_passed
+        return cls.from_counts(
+            run_id,
+            total=len(records),
+            passed=sum(1 for record in records if record.passed),
+            required_total=len(required),
+            required_passed=sum(1 for record in required if record.passed),
+        )
 
+    @classmethod
+    def from_counts(
+        cls,
+        run_id: str,
+        *,
+        total: int,
+        passed: int,
+        required_total: int,
+        required_passed: int,
+    ) -> VerificationSummary:
+        """Build a summary from pre-aggregated counts.
+
+        The second entry point exists for the effectiveness report, which needs the
+        summary of every run beneath a set of usage rows. Reading each run's verdicts
+        and calling :meth:`from_records` would be the N+1 that round-7 brief section
+        56 rules out, and re-deriving ``pass_rate`` / ``all_passed`` at the call site
+        would put the definition of a verified success in two places. Both callers
+        therefore funnel through this constructor.
+        """
+        failed = total - passed
+        required_failed = required_total - required_passed
         return cls(
             run_id=run_id,
             total=total,
@@ -89,22 +117,35 @@ class VerificationSummary(BaseModel):
 def is_verified_success(status: RunStatus, summary: VerificationSummary) -> bool:
     """Whether a run can be called a *verified* success.
 
-    The one definition, in one place::
+    Two statuses can reach it, and the second one is the whole point of
+    ``INCONCLUSIVE`` (round-8.1.1, D-100)::
 
-        verified_success  ==  Run.status is SUCCESS
+        verified_success  ==  (Run.status is SUCCESS or Run.status is INCONCLUSIVE)
                               AND at least one required verification exists
                               AND no required verification failed
 
-    Each clause rejects a distinct lie:
+    Why ``INCONCLUSIVE`` qualifies: the clause exists to stop an *agent's own claim*
+    from being mistaken for evidence of the work. An ``INCONCLUSIVE`` run contains no
+    claim at all -- nobody declared anything -- so the required verification is not
+    competing with a declaration, it is **substituting** for one. Requiring a
+    declaration first would mean that the integrations which cannot state an outcome
+    (a CLI whose session hooks carry no result) could never produce a verified success
+    even when an independent check proved the task was done: the evidence would be
+    there and the vocabulary would have no way to say so.
 
-    * a ``FAILED`` or ``ABORTED`` run is not a success no matter what passed --
-      passing checks show the environment is fine, not that the agent finished;
+    Why the other statuses do not: ``FAILED``, ``ABORTED`` and ``PARTIAL_SUCCESS`` are
+    declarations that the work was *not* completed. Passing checks show the
+    environment is fine, not that the agent finished, so no verification can promote
+    one of them.
+
+    Each remaining clause rejects a distinct lie:
+
     * ``required_total == 0`` rejects "verified" by absence of evidence;
     * ``required_failed == 0`` is the actual confirmation.
 
     This is a **derived** predicate, never stored on the run. It must be recomputed
     after new verdicts arrive, which is exactly what makes it trustworthy.
     """
-    return (
-        status is RunStatus.SUCCESS and summary.required_total > 0 and summary.required_failed == 0
-    )
+    if status not in _SUCCESS_STATUSES:
+        return False
+    return summary.required_total > 0 and summary.required_failed == 0

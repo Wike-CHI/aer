@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+
+    "rootDir": "src",
+    "outDir": "lib",
+    "declaration": true,
+    // Never emit a runnable artifact from a build that did not typecheck.
+    "noEmitOnError": true,
+    "declarationMap": false,
+    "sourceMap": false,
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts"]
+}

@@ -11,11 +11,15 @@ from aer import AER, AERError, EventType
 from aer.storage import head_revision, upgrade_to_head
 from aer.storage.database import Database
 from aer.storage.models import (
+    AdapterEventRow,
+    AdapterSessionRow,
     ErrorRow,
     EventRow,
     ExperienceRow,
     ExperienceSourceRow,
+    ExperienceUsageRow,
     RecoveryRow,
+    RetrievalSessionRow,
     RunRow,
     VerificationRow,
 )
@@ -47,12 +51,16 @@ class TestInitialisation:
 
     def test_schema_contains_every_migrated_table(self, aer: AER) -> None:
         assert aer.database.table_names() == [
+            "adapter_events",
+            "adapter_sessions",
             "alembic_version",
             "errors",
             "events",
             "experience_sources",
+            "experience_usage",
             "experiences",
             "recoveries",
+            "retrieval_sessions",
             "runs",
             "verifications",
         ]
@@ -63,6 +71,10 @@ class TestInitialisation:
         assert VerificationRow.__tablename__ == "verifications"
         assert ExperienceRow.__tablename__ == "experiences"
         assert ExperienceSourceRow.__tablename__ == "experience_sources"
+        assert RetrievalSessionRow.__tablename__ == "retrieval_sessions"
+        assert ExperienceUsageRow.__tablename__ == "experience_usage"
+        assert AdapterSessionRow.__tablename__ == "adapter_sessions"
+        assert AdapterEventRow.__tablename__ == "adapter_events"
 
     def test_migrations_are_recorded_and_reapplying_them_is_safe(self, aer: AER) -> None:
         assert aer.database.schema_revision() == head_revision()
@@ -72,12 +84,16 @@ class TestInitialisation:
 
         assert aer.database.schema_revision() == head_revision()
         assert aer.database.table_names() == [
+            "adapter_events",
+            "adapter_sessions",
             "alembic_version",
             "errors",
             "events",
             "experience_sources",
+            "experience_usage",
             "experiences",
             "recoveries",
+            "retrieval_sessions",
             "runs",
             "verifications",
         ]

@@ -259,3 +259,64 @@ jobs:
             done
           '
 
+
+  # The DSH adapter is this repository's first TypeScript, and it is the first
+  # integration whose correctness depends on two languages agreeing on a wire
+  # protocol. A green Python job says nothing about whether the plugin still
+  # compiles or whether the two halves still speak the same framing, so it is a
+  # separate job rather than a step.
+  #
+  # No model provider is contacted here: the tests drive the bridge directly and
+  # assert on the protocol. Provider-backed end-to-end runs need a credential and
+  # stay manual on purpose.
+  dsh-adapter:
+    name: dsh adapter (TypeScript + bridge)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integrations/dsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # The bridge test starts the real Python bridge as a child process, so the
+      # Python side has to be importable in this job too. It is installed from the
+      # repository root, not from the adapter directory.
+      - name: Install AER for the bridge
+        working-directory: .
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --editable '.'
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: integrations/dsh/package-lock.json
+
+      # `npm ci` and not `npm install`: DSH is a Developer Preview, so resolving
+      # "latest" here would silently test a different harness than the one recorded
+      # in the lock file. The lock is committed for exactly this reason.
+      - name: Install the adapter's dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      # Crosses the language boundary: starts `python -m aer.adapter.dsh.bridge`
+      # and speaks the wire protocol to it from Node. This is the only test that can
+      # catch the two halves drifting apart on framing, versioning or operation
+      # names.
+      - name: Plugin and bridge tests
+        env:
+          AER_DSH_CWD: ${{ github.workspace }}
+        run: npm test

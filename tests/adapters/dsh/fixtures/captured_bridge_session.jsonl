@@ -1,0 +1,6 @@
+{"at": "2026-09-28T17:35:19", "operation": "session.begin", "request": {"session": {"external_session_id": "s1", "cwd": "/tmp"}}, "result": null}
+{"at": "2026-09-28T17:35:19", "operation": "turn.begin", "request": {"session": {"external_session_id": "s1"}, "turn": 1, "task": "do a thing"}, "result": null}
+{"at": "2026-09-28T17:35:19", "operation": "event.ingest", "request": {"envelope": {"event_type": "TOOL_CALL", "external_event_id": "s1:3", "external_session_id": "s1", "external_turn_id": "1", "payload": {"tool": "bash", "call_id": "c1", "arguments": "{\"cmd\":\"echo hi\"}"}}}, "result": null}
+{"at": "2026-09-28T17:35:19", "operation": "experience.retrieve", "request": {"session": {"external_session_id": "s1"}, "turn": 1, "task": "do a thing"}, "result": {"retrieval_id": "probe-0", "context_text": "AER-PROBE-CONTEXT-X1", "experience_count": 1}}
+{"at": "2026-09-28T17:35:19", "operation": "experience.injected", "request": {"session": {"external_session_id": "s1"}, "turn": 1, "retrieval_id": "probe-1", "experience_count": 1, "seq": 4}, "result": null}
+{"at": "2026-09-28T17:35:19", "operation": "turn.end", "request": {"session": {"external_session_id": "s1"}, "turn": 1, "reason_kind": "completed", "outcome": "INCONCLUSIVE", "detail": {}}, "result": null}

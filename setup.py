@@ -19,7 +19,7 @@ copied into ``aer/_migrations/``, *mirroring the repository layout* underneath i
     aer/_migrations/alembic.ini
     aer/_migrations/migrations/env.py
     aer/_migrations/migrations/script.py.mako
-    aer/_migrations/migrations/versions/0001_...py  (.. 0004)
+    aer/_migrations/migrations/versions/0001_...py  (.. 0006)
 
 Mirroring rather than flattening is deliberate: ``_repository_root()`` already
 resolves ``<root>/alembic.ini`` and ``<root>/migrations``, so the installed

@@ -1211,3 +1211,413 @@ v0.6.0 就是栽在这里：`neug==0.2.0` 只有 macOS 与 Linux 的 wheel，而
 pip install --upgrade "aer-runtime[knowledge]"
 python -c "import neug; print(neug.__file__)"
 ```
+
+---
+
+## 21. 经验使用与效果（M7）
+
+M7 的数据是**行为事实**，全部在 SQLite 里，不进 NeuG。因此它的运维与知识库索引
+完全解耦：知识索引坏掉不影响读 usage，usage 库写不进去也不影响检索（只是这次检索
+不算被记录）。
+
+### 21.1 表
+
+```text
+retrieval_sessions   一次检索一行；0 结果也写
+experience_usage     一次检索 × 一条经验；UNIQUE(session, experience)
+```
+
+`retrieval_sessions.run_id` 是 `ON DELETE SET NULL`：Run 被删掉时，检索记录仍然成立，
+只是变成"未归属"，报告里用 `unattributed_usage_count` 单独计数。
+
+### 21.2 读一次效果报告
+
+```python
+report = aer.experience_effectiveness(experience_id)
+print(report.describe())
+print(aer.experience_confidence(experience_id).describe())
+print(aer.evaluate_promotion(experience_id).describe())   # 只判断，不改状态
+```
+
+`describe()` 的一行长这样：
+
+```text
+exp-...: retrieved 2x, injected 2x, adopted 2x, ignored 0x, rejected 0x,
+         runs 2 (verified success 1, verified failure 1, unverified 0),
+         observed success rate 50%, harmful 0
+```
+
+读的时候必须记住名字的含义：
+
+```text
+observed success rate = P(success | experience injected)  ← 观察到的相关性
+                      ≠ P(success | do(experience injected))  ← 因果效果
+```
+
+真正的因果证据需要 randomized holdout（`experiment_id` / `assignment` 已预留，
+本轮不实现）。
+
+### 21.3 升级到 revision 0005
+
+```bash
+# 1) 备份（先备份，再迁移）
+python scripts/backup_sqlite.py --data-dir /srv/aer/data \
+       --backup-dir /srv/aer/backups
+
+# 2) 迁移（容器内；幂等）
+docker compose -f compose.yaml run --rm aer-runtime alembic upgrade head
+
+# 3) 确认
+docker compose -f compose.yaml run --rm aer-runtime alembic current
+#   → 0005 (head)
+
+# 4) 只读冒烟
+docker compose -f compose.yaml run --rm aer-runtime python /app/scripts/smoke_test.py \
+       --expect-revision 0005
+```
+
+`0004 → 0005` 是**纯增量**：只建两张新表，不动任何既有表、不搬任何数据。
+
+```text
+迁移前：8 张表 + alembic_version（revision 0004）
+迁移后：10 张表 + alembic_version（revision 0005）
+        旧 Experience / ExperienceSource 逐字段保留
+        retrieval_sessions / experience_usage 为空表
+```
+
+**生产库升级后 usage 表是空的，这是正常状态**，不是迁移失败：线上还没有任何一次
+通过 `retrieve_for_run()` 的检索。不要为了"看起来有数据"往生产塞测试数据。
+
+### 21.4 回滚
+
+```bash
+# 镜像回滚：只切镜像，不动数据库（推荐路径）
+bash ./rollback.sh
+
+# 数据库回滚到 0004：会 DROP 两张表
+docker compose -f compose.yaml run --rm aer-runtime alembic downgrade 0004
+```
+
+`downgrade` 会**不可恢复地丢掉全部 usage 历史**——它不像知识索引那样能从别处重建。
+这是唯一一处"降级即丢数据"的地方，必须显式决定：
+
+```text
+旧镜像（< 0.7.0）不认识 0005，但也不需要认识：
+0005 只是新增两张表，旧代码不查它们，因此**通常不需要 downgrade**。
+只有在确定要彻底删除 usage 数据时才执行 downgrade。
+```
+
+### 21.5 明确不做
+
+本轮的运维面只有上面这些。没有 Dashboard、没有 FastAPI、没有定时报表、
+没有自动晋升任务：晋升由调用方或运维显式执行 `promote_experience()`，
+因为一个会自己改状态的策略无法事后审计（D-070）。
+
+---
+
+## 22. M7 生产验收记录（2026-09-20）
+
+### 22.1 验收清单
+
+```text
+[ ] SQLite head = 0005
+[ ] retrieval_sessions 存在
+[ ] experience_usage 存在
+[ ] 既有 Experience 完整保留（条数与字段）
+[ ] 旧表行数不变
+[ ] NeuG Knowledge status healthy（reachable / drift none）
+[ ] Production Smoke PASS
+```
+
+生产当前 Experience 可能仍为 **0 条**，usage 也必然为 0 条。**这不影响验收**：
+本轮验收的对象是"结构正确且既有数据未被破坏"，不是"有真实使用数据"。
+
+### 22.2 迁移前后对照
+
+```bash
+# 迁移前
+docker compose -f compose.yaml run --rm aer-runtime alembic current
+docker compose -f compose.yaml run --rm aer-runtime python - <<'PY'
+import sqlite3
+c = sqlite3.connect("/data/aer.db")
+for table in ("experiences", "experience_sources", "runs", "verifications"):
+    print(table, c.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+print("integration", c.execute("PRAGMA integrity_check").fetchone()[0])
+PY
+
+# 迁移后，重复上面两条，并确认新表存在且为空
+```
+
+### 22.3 一致性检查
+
+```text
+[ ] 迁移前后 experiences / experience_sources / runs / verifications 行数一致
+[ ] integrity_check = ok
+[ ] retrieval_sessions / experience_usage 行数 = 0
+[ ] knowledge status 仍然 healthy（索引没被这次迁移影响）
+[ ] 用 --expect-revision 0005 冒烟通过
+```
+
+任何一项不符：**不要继续**，按 §21.4 回滚镜像，并从 §21.3 的备份恢复。
+
+### 22.4 本轮的上线边界
+
+```text
+Usage 只写 SQLite；NeuG 完全没被这一轮改动
+retrieve() 行为与 M6 完全一致（纯读）
+retrieve_for_run() 是新增入口；旧调用方升级后行为不变
+promote_experience() 会在 SQLite 提交后尽力投影，失败只留下 stale 索引，
+由 rebuild 修复（D-066 / section 44）
+```
+
+---
+
+## 23. Agent Adapter Protocol 的运维（M8）
+
+M8 新增的是**接入面**，不是新的数据面：外部 Agent 的事件最终仍然写进 `events`，
+usage 仍然写进 M7 的两张表。新增的两张表只描述**集成本身**。
+
+### 23.1 表
+
+```text
+adapter_sessions   provider + external_session_id 唯一 → 当前 AER Run
+adapter_events     provider + external_event_id 唯一 → 幂等账本（applied 标记）
+```
+
+两张表都不是 trace 的一部分（第 53 节）：trace 的历史语义没有被本轮改动。
+
+### 23.2 升到 revision 0006
+
+```bash
+# 1) 备份
+python scripts/backup_sqlite.py --data-dir /srv/aer/data --backup-dir /srv/aer/backups
+
+# 2) 迁移
+docker compose -f compose.yaml run --rm aer-runtime alembic upgrade head
+
+# 3) 确认
+docker compose -f compose.yaml run --rm aer-runtime alembic current
+#   → 0006 (head)
+
+# 4) 只读冒烟
+docker compose -f compose.yaml run --rm aer-runtime python /app/scripts/smoke_test.py \
+       --expect-revision 0006
+```
+
+`0005 → 0006` 是**纯增量**：
+
+```text
+迁移前：10 张表（revision 0005）
+迁移后：12 张表（revision 0006）
+        既有 runs / events / errors / verifications / experiences / usage 全部保留
+        adapter_sessions / adapter_events 为空表
+```
+
+**升级后 adapter 表为空是正常状态**，不是迁移失败：线上还没有接入任何外部 Agent。
+不要为了"看起来有数据"往生产塞测试数据。
+
+### 23.3 回滚
+
+```bash
+bash ./rollback.sh                                            # 只切镜像（推荐）
+docker compose -f compose.yaml run --rm aer-runtime alembic downgrade 0005   # 会 DROP 两张表
+```
+
+`downgrade` 会丢掉两样东西，且都不可从别处恢复：
+
+```text
+external session → AER run 的映射     重连的 Agent 会新建一条 Run（trace 被切成两段）
+已接受事件的幂等账本                  重投的 hook 会被再应用一次
+```
+
+trace 本身还在（`events` 里），但**集成记忆**没了。因此旧镜像（< 0.8.0）并不需要
+downgrade：它只是不查这两张表。
+
+### 23.4 观测点
+
+```python
+print(aer.adapter_status())
+# {'protocol_version': '1', 'sessions': N, 'events': M, 'unapplied_events': K,
+#  'adapters': [{'name': ..., 'protocol_version': ..., 'missing_capabilities': [...]}]}
+```
+
+```text
+sessions           已建立的外部会话映射数（一个外部会话可能对应多条 Run，见 reopen）
+events             已接受的去重后外部事件数
+unapplied_events   已 claim 但未完成 apply 的条数
+                   ← 这是唯一需要盯的数字：>0 表示某次 ingest 中途死掉
+adapters           已注册 Adapter 及其**未声明**的能力
+```
+
+`unapplied_events > 0` 的含义与处置：
+
+```text
+含义：进程在 claim 与 apply 之间被杀（D-079 的取舍，不是 bug）
+影响：那一条外部事件不会被自动重放（这是刻意选择：宁丢不重）
+处置：查看 adapter_events.list(applied=False) 定位；不需要修数据，
+      因为 Run 上并没有写错的东西——那条事件从来没进去过
+```
+
+### 23.5 明确不做
+
+```text
+不自建 Dashboard / FastAPI 暴露 adapter 状态
+不做 Plugin Marketplace / 动态加载
+不在 trace 上记录"集成崩了"的事件（D-082：那会污染 Distillation 的证据）
+```
+
+---
+
+## 24. M8 生产验收记录（2026-09-20）
+
+### 24.1 验收清单
+
+```text
+[ ] SQLite head = 0006
+[ ] adapter_sessions 存在
+[ ] adapter_events 存在
+[ ] 既有 Experience / Usage 完整保留（条数与字段）
+[ ] 旧表行数不变
+[ ] NeuG Knowledge status healthy（本轮完全不碰知识索引）
+[ ] Production Smoke PASS
+```
+
+生产当前 usage 可能仍为 **0 条**，adapter 两张表必然为 0 条。**这不影响验收**：
+本轮验收的对象是"结构正确且既有数据未被破坏"，不是"已经有真实 Agent 接入"。
+真实 Codex / Claude / Cursor / DSH 接入属于 M8.1–M8.4（第 59 节）。
+
+### 24.2 迁移前后对照
+
+```bash
+# 迁移前
+docker compose -f compose.yaml run --rm aer-runtime alembic current
+docker compose -f compose.yaml run --rm aer-runtime python - <<'PY'
+import sqlite3
+c = sqlite3.connect("/data/aer.db")
+for table in ("experiences", "experience_sources", "retrieval_sessions",
+              "experience_usage", "runs", "verifications"):
+    print(table, c.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+print("integration", c.execute("PRAGMA integrity_check").fetchone()[0])
+PY
+
+# 迁移后重复上面两条，并确认 adapter 两张表存在且为空
+```
+
+### 24.3 一致性检查
+
+```text
+[ ] 迁移前后 experiences / experience_sources / retrieval_sessions /
+    experience_usage / runs / verifications 行数一致
+[ ] integrity_check = ok
+[ ] adapter_sessions / adapter_events 行数 = 0
+[ ] knowledge status 仍然 healthy（本轮没有动它）
+[ ] 用 --expect-revision 0006 冒烟通过
+```
+
+任何一项不符：**不要继续**，按 §23.3 回滚镜像，并从 §23.2 的备份恢复。
+
+### 24.4 本轮的上线边界
+
+```text
+协议本身可用，但没有任何真实厂商 Adapter 会被部署（M8.1–M8.4 才做）
+旧调用方升级后行为不变：run/event/experience/usage 的写入路径未被改动
+新增的写入路径只有两条：adapter_sessions / adapter_events
+RunContext 增加了一层外部事件 API（run.external）；原有 API 语义未变
+Adapter 输入走独立脱敏路径；同进程 SDK 的结构化负载策略未变
+```
+
+---
+
+## 25. Outcome Semantics（M8.1.1）：没有迁移
+
+M8.1.1 只改了**一个终态的含义与映射**，没有改 schema、没有加表、没有动事件词汇表。
+
+```text
+alembic head        仍然是 0006 —— 不需要 upgrade，不需要 downgrade
+新增的写入路径      无（INCONCLUSIVE 是 runs.status 的一个新取值，仍是 Text 列）
+既有数据            不受影响
+```
+
+### 25.1 验收（很轻）
+
+```bash
+docker compose -f compose.yaml run --rm aer-runtime alembic current      # 应为 0006
+docker compose -f compose.yaml run --rm aer-runtime python /app/scripts/smoke_test.py        --expect-revision 0006
+```
+
+`runs.status` 是普通文本列，新取值不需要 DDL。数据库里出现 `INCONCLUSIVE` 是**预期**的
+（下一次 Codex 会话结束就会产生），不是迁移失败。
+
+### 25.2 唯一需要知道的行为变化
+
+```text
+旧：Codex 会话结束（reason="other"）→ Run.status = ABORTED
+新：同一事件                        → Run.status = INCONCLUSIVE
+```
+
+对下游的意义：
+
+```text
+ABORTED 重新只表示"agent 声明放弃"（run.abort()），不再兼职"没人声明结果"
+INCONCLUSIVE 不再被计入失败：DistillationTrigger.FAILED_RUN 不含它，
+             RunOutcome.RUN_FAILED 也不含它（计为 UNVERIFIED）
+一个 INCONCLUSIVE 的 Run 仍可被独立验证确立为 verified success（kind = SUCCESS/RECOVERY）
+FAILED / ABORTED / PARTIAL_SUCCESS 的语义与所有下游行为**完全未变**
+```
+
+### 25.3 已发布数据不存在兼容问题
+
+`metadata["outcome_declared"]` 这个约定在 M8.1 引入、随 M8.1.1 删除，**从未发布**：
+§24 记录了生产 `adapter_sessions` / `adapter_events` 为空，因此没有 Codex Run 存在于生产库中。
+若某个开发环境里存在旧的 Codex Run（`ABORTED` + `outcome_declared=false`），
+它们会按 `ABORTED` 的原意被读作"agent 声明放弃"，并产生一条 FAILURE 经验。
+处置方式：删除该开发库，或不管它 —— 它只影响开发数据。
+
+---
+
+## 25. Outcome Semantics 的运维（M8.1.1）
+
+**本轮没有 schema 变更、没有迁移、没有新增表。** `alembic current` 仍然是 **`0006`**，
+不需要 `upgrade`，也不需要重跑备份流程。唯一改动是代码里的状态映射与派生判断。
+
+### 25.1 对既有数据的影响
+
+```text
+runs.status 是普通文本列，新增取值 INCONCLUSIVE 不需要 DDL
+没有已发布的 ABORTED 行需要改写：
+  M8.1 的 adapter 从未部署（24.4），而 ABORTED 的自动写入只发生在 adapter 关闭 Run 时
+  in-process 调用方的 run.abort() 语义完全不变
+experience / usage / verification 表未被触碰
+```
+
+### 25.2 行为变化（只需要知道两条）
+
+```text
+1. SessionEnd 没有声明结果时，Run 现在是 INCONCLUSIVE，不再是 ABORTED。
+   INCONCLUSIVE 不等于失败：它不进 DistillationTrigger.FAILED_RUN，
+   也不进 RunOutcome.RUN_FAILED，因此在效果报告里算 UNVERIFIED（不在分母）。
+2. 一个 INCONCLUSIVE 的 Run 如果通过 required 验证，就**可以是** verified_success —— 这是本轮的
+   目的。验证记录仍然是从不写回 Run.status 的独立事实。
+```
+
+### 25.3 观测点
+
+```text
+aer.adapter_status()                     不变（协议版本仍是 '1'）
+aer.verified_success(run_id)             现在对 INCONCLUSIVE + required PASS 返回 True
+aer.evaluate_distillation(run_id)        对未验证的 INCONCLUSIVE 返回 should_distill=False
+                                         reasons 会说明"没有声明也没有验证"
+```
+
+需要注意的一条：**未验证的 INCONCLUSIVE Run 不产出经验。** 这是刻意的
+（没有 kind 可写，见 D-100 的"代价"），不是缺陷；若线上出现大量此类 Run，
+正确的动作是补验证路径，而不是放宽过滤。
+
+### 25.4 回滚
+
+把镜像切回 0.8.0 即可。旧代码不识别 `INCONCLUSIVE`，读取这类 Run 会在
+`decode_enum` 处报 `StorageError`。因此**回滚前请确认没有 INCONCLUSIVE 行**：
+
+```bash
+docker compose -f compose.yaml run --rm aer-runtime python -c "import sqlite3; c=sqlite3.connect('/data/aer.db'); print(c.execute('SELECT status, COUNT(*) FROM runs GROUP BY status').fetchall())"
+```

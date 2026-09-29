@@ -83,6 +83,31 @@ class RecoveryRepository:
             recoveries = [_to_domain(row) for row in session.execute(statement).scalars().all()]
         return recoveries
 
+    def earliest_open(self, run_id: str) -> RecoveryRecord | None:
+        """The oldest recovery attempt of ``run_id`` that has not finished yet.
+
+        Added for the adapter protocol (Milestone 8). A vendor's "the repair attempt
+        ended" event carries no AER identifier -- the external Agent has never heard of
+        a ``RecoveryRecord`` -- so the result has to be matched to the attempt that is
+        still open. Oldest-first is the ordering that matches how attempts actually
+        nest: the one that started first is the one that finishes first.
+
+        ``None`` rather than a fabricated record: a result with no open attempt is a
+        protocol error, and inventing an attempt to receive it would turn an integration
+        bug into a false repair history.
+        """
+        recovery: RecoveryRecord | None
+        with self._database.session(f"load open recovery for run {run_id}") as session:
+            statement = (
+                select(RecoveryRow)
+                .where(RecoveryRow.run_id == run_id, RecoveryRow.success.is_(None))
+                .order_by(RecoveryRow.started_at.asc(), RecoveryRow.id.asc())
+                .limit(1)
+            )
+            row = session.execute(statement).scalars().first()
+            recovery = None if row is None else _to_domain(row)
+        return recovery
+
     def count_by_run(self, run_id: str) -> int:
         """Number of recovery attempts recorded for a run."""
         total: int

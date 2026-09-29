@@ -4,11 +4,15 @@ Everything about *when* an Experience may move between statuses lives here, so t
 rule is stated once and can be read, tested and quoted. ``Experience.transition_to``
 is the only caller.
 
-The order is **RAW -> DISTILLED -> VERIFIED** (``docs/DECISIONS.md`` D-029):
+The order is **RAW -> DISTILLED -> VERIFIED -> REUSED -> PROVEN** (``docs/DECISIONS.md``
+D-029, extended in Milestone 7):
 
 * ``RAW``       -- a candidate is persisted but has not been through distillation;
 * ``DISTILLED`` -- the trajectory has been compressed into a structured claim;
-* ``VERIFIED``  -- the core facts of that claim are backed by external evidence.
+* ``VERIFIED``  -- the core facts of that claim are backed by external evidence;
+* ``REUSED``    -- it was injected into a real run other than the one it came from;
+* ``PROVEN``    -- it was explicitly adopted in several distinct, verified-successful
+  runs and has no harmful feedback against it.
 
 ``agent.md #24``, ``docs/TASKS.md`` Task 5.2 and the design document originally
 declared ``RAW -> VERIFIED -> DISTILLED``. That ordering is logically impossible in
@@ -17,12 +21,23 @@ after distillation, so "verified before distilled" would mean verifying somethin
 that had not been formulated yet. The three documents were corrected in this
 milestone rather than implementing the old order mechanically.
 
-Only the first three statuses can be reached today. ``REUSED`` and beyond need data
-that does not exist yet (reuse tracking arrives with ``experience_usage`` in
-Milestone 7), so this table deliberately contains **no edges into them**: an
-Experience cannot claim to have been reused when nothing has recorded a reuse
-(section 56 of the round-5 brief forbids exactly that promotion). The edges out of
-them exist so invalidation keeps working the moment they become reachable.
+Only ``RAW`` through ``PROVEN`` can be reached today. ``TRAINING_CANDIDATE`` and
+``TRAINING_DATA`` still have no producer -- turning knowledge into training data needs
+a dataset builder and a quality gate, which are not part of this milestone -- so this
+table deliberately contains **no edges into them**. What changed in Milestone 7 is the
+span from ``VERIFIED`` to ``PROVEN``: those two edges are now real, because usage
+tracking finally supplies the evidence they require.
+
+* ``VERIFIED -> REUSED`` -- the claim has been verified *and* has been injected into a
+  real run other than the one it was distilled from. Merely being retrieved does not
+  count (round-7 brief, sections 33-34), and a successful outcome is not required
+  (section 35): being used again is the fact, not being used well;
+* ``REUSED -> PROVEN`` -- a stricter question, answered by
+  :mod:`aer.usage.promotion`, not by this table. The edge exists here so the state
+  machine permits it; the policy decides when.
+
+Every non-terminal status may still be ``DEPRECATED``: withdrawing knowledge has to
+stay possible regardless of how far it got.
 """
 
 from __future__ import annotations
@@ -35,23 +50,36 @@ from aer.runtime.enums import ExperienceStatus
 #: Legal transitions, keyed by current status.
 #:
 #: Read as "from X you may go to any of these". An empty set means the status is
-#: terminal. Every non-terminal status may be ``DEPRECATED``: withdrawing
-#: knowledge has to stay possible regardless of how far the knowledge got.
+#: terminal.
 ALLOWED_TRANSITIONS: Final = MappingProxyType(
     {
         ExperienceStatus.RAW: frozenset({ExperienceStatus.DISTILLED, ExperienceStatus.DEPRECATED}),
         ExperienceStatus.DISTILLED: frozenset(
             {ExperienceStatus.VERIFIED, ExperienceStatus.DEPRECATED}
         ),
-        ExperienceStatus.VERIFIED: frozenset({ExperienceStatus.DEPRECATED}),
-        # Reachable only once reuse tracking exists (Milestone 7).
-        ExperienceStatus.REUSED: frozenset({ExperienceStatus.DEPRECATED}),
+        ExperienceStatus.VERIFIED: frozenset(
+            {ExperienceStatus.REUSED, ExperienceStatus.DEPRECATED}
+        ),
+        # Promotable further, and withdrawable. Both directions are decided by data.
+        ExperienceStatus.REUSED: frozenset({ExperienceStatus.PROVEN, ExperienceStatus.DEPRECATED}),
+        # No edge into TRAINING_CANDIDATE yet: that needs a dataset builder and a
+        # quality gate, and an experience that is merely proven is not yet training
+        # material (round-7 brief, section 81).
         ExperienceStatus.PROVEN: frozenset({ExperienceStatus.DEPRECATED}),
         ExperienceStatus.TRAINING_CANDIDATE: frozenset({ExperienceStatus.DEPRECATED}),
         ExperienceStatus.TRAINING_DATA: frozenset({ExperienceStatus.DEPRECATED}),
         # Terminal: an invalidated Experience never comes back to life.
         ExperienceStatus.DEPRECATED: frozenset(),
     }
+)
+
+#: Lifecycle order, without the terminal withdrawal state.
+#:
+#: ``DEPRECATED`` is declared last in :class:`ExperienceStatus` but is not the *most*
+#: advanced state -- it is the withdrawn one -- so it is excluded from the ordering
+#: rather than accidentally ranked above ``TRAINING_DATA``.
+_ORDERED_STATUSES: Final = tuple(
+    status for status in ExperienceStatus if status is not ExperienceStatus.DEPRECATED
 )
 
 
@@ -75,6 +103,29 @@ def can_transition(current: ExperienceStatus, target: ExperienceStatus) -> bool:
 def is_terminal(status: ExperienceStatus) -> bool:
     """Whether ``status`` has no outgoing transitions."""
     return not ALLOWED_TRANSITIONS[ExperienceStatus(status)]
+
+
+def status_rank(status: ExperienceStatus) -> int:
+    """Position of ``status`` in the lifecycle order.
+
+    ``DEPRECATED`` has no rank and reports ``-1``: a withdrawn experience is not
+    "past the end" of the lifecycle, it is outside it, and every comparison that
+    matters in Milestone 7 (promotion policy) must treat it as ineligible rather
+    than as maximally advanced.
+    """
+    status = ExperienceStatus(status)
+    if status is ExperienceStatus.DEPRECATED:
+        return -1
+    return _ORDERED_STATUSES.index(status)
+
+
+def is_at_least(status: ExperienceStatus, floor: ExperienceStatus) -> bool:
+    """Whether ``status`` is at or beyond ``floor`` in lifecycle order.
+
+    Used by the promotion policy ("status must be at least ``REUSED``"), which is why
+    a deprecated experience answers ``False`` for every floor.
+    """
+    return status_rank(status) >= status_rank(floor)
 
 
 def reachable_from(status: ExperienceStatus) -> frozenset[ExperienceStatus]:

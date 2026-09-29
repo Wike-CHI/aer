@@ -26,6 +26,7 @@ class TestRunStatus:
             "PARTIAL_SUCCESS",
             "FAILED",
             "ABORTED",
+            "INCONCLUSIVE",
         }
 
     def test_members_are_plain_strings(self) -> None:

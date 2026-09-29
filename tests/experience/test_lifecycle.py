@@ -1,10 +1,18 @@
-"""The Experience lifecycle state machine (Milestone 5, sections 9-10, 34-36, 47).
+"""The Experience lifecycle state machine (Milestone 5, sections 9-10, 34-36, 47;
+extended in Milestone 7).
 
-The ordering under test is ``RAW -> DISTILLED -> VERIFIED``, not the
-``RAW -> VERIFIED -> DISTILLED`` that ``agent.md``, ``docs/TASKS.md`` and the design
-document originally declared. Both the code and those documents were corrected in
-this milestone (``docs/DECISIONS.md`` D-029); the reasoning is restated in the last
+The ordering under test is ``RAW -> DISTILLED -> VERIFIED -> REUSED -> PROVEN``, not
+the ``RAW -> VERIFIED -> DISTILLED`` that ``agent.md``, ``docs/TASKS.md`` and the
+design document originally declared. Both the code and those documents were corrected
+in Milestone 5 (``docs/DECISIONS.md`` D-029); the reasoning is restated in the last
 test of this file so the change cannot be reverted by accident.
+
+What Milestone 7 adds is the top of the ladder. ``REUSED`` and ``PROVEN`` stop being
+unreachable placeholders because usage tracking finally produces the evidence they
+require -- but the *edges* are all this file tests. When an experience has earned a
+promotion is a policy question, answered in ``aer.usage.promotion`` and tested there;
+here the only claim is that the state machine permits the step and that nothing may
+skip one.
 """
 
 from __future__ import annotations
@@ -64,6 +72,23 @@ class TestLegalTransitions:
         assert verified.status is ExperienceStatus.VERIFIED
         assert verified.outcome_verified is True
 
+    def test_the_happy_path_can_now_continue_to_reused_and_proven(self) -> None:
+        """The full ladder, walked one legal step at a time (Milestone 7)."""
+        experience = make_experience()
+        distilled = experience.transition_to(ExperienceStatus.DISTILLED)
+        verified = distilled.mark_verified(reason="2 required verifications passed")
+
+        reused = verified.transition_to(ExperienceStatus.REUSED, reason="injected into run-b")
+        proven = reused.transition_to(
+            ExperienceStatus.PROVEN, reason="adopted in 5 distinct verified runs"
+        )
+
+        assert reused.status is ExperienceStatus.REUSED
+        assert proven.status is ExperienceStatus.PROVEN
+        # The promotion must not disturb what the claim already asserted.
+        assert proven.outcome_verified is True
+        assert proven.solution == experience.solution
+
     def test_anything_can_be_deprecated(self) -> None:
         for status in ExperienceStatus:
             if status is ExperienceStatus.DEPRECATED:
@@ -105,13 +130,42 @@ class TestForbiddenTransitions:
         with pytest.raises(ExperienceLifecycleError, match="is not an allowed"):
             experience.transition_to(ExperienceStatus(target))
 
-    def test_promotion_beyond_verified_is_impossible_today(self) -> None:
-        """Section 56: reuse, proven-ness and training candidacy need data that does
-        not exist yet, so no run of the pipeline may reach them."""
-        for start in (ExperienceStatus.RAW, ExperienceStatus.DISTILLED, ExperienceStatus.VERIFIED):
+    def test_the_reachable_set_from_verified_is_exactly_the_two_promotions(self) -> None:
+        """Milestone 7 opens ``VERIFIED -> REUSED -> PROVEN`` and nothing else.
+
+        Asserted as an exact set rather than as "REUSED is in there" so that adding a
+        status without deciding where it sits fails here first.
+        """
+        for start in (ExperienceStatus.RAW, ExperienceStatus.DISTILLED):
             reachable = reachable_from(start)
-            assert ExperienceStatus.REUSED not in reachable
-            assert ExperienceStatus.PROVEN not in reachable
+            assert ExperienceStatus.TRAINING_CANDIDATE not in reachable
+            assert ExperienceStatus.TRAINING_DATA not in reachable
+
+        assert reachable_from(ExperienceStatus.VERIFIED) == {
+            ExperienceStatus.REUSED,
+            ExperienceStatus.PROVEN,
+            ExperienceStatus.DEPRECATED,
+        }
+        assert reachable_from(ExperienceStatus.REUSED) == {
+            ExperienceStatus.PROVEN,
+            ExperienceStatus.DEPRECATED,
+        }
+
+    def test_a_reused_experience_can_still_be_withdrawn(self) -> None:
+        """Deprecation stays available at every rung, promotions included."""
+        assert can_transition(ExperienceStatus.REUSED, ExperienceStatus.DEPRECATED)
+        assert can_transition(ExperienceStatus.PROVEN, ExperienceStatus.DEPRECATED)
+        assert is_terminal(ExperienceStatus.PROVEN) is False
+
+    def test_training_stages_have_no_producer(self) -> None:
+        """PROVEN is not training data (round-7 brief, section 81).
+
+        Turning knowledge into training material needs a dataset builder, dedup, a
+        safety pass and holdout separation -- none of which exist here -- so the
+        lifecycle deliberately offers no edge into either training status.
+        """
+        for start in ExperienceStatus:
+            reachable = reachable_from(start)
             assert ExperienceStatus.TRAINING_CANDIDATE not in reachable
             assert ExperienceStatus.TRAINING_DATA not in reachable
 

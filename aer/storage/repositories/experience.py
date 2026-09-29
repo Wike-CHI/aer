@@ -130,7 +130,14 @@ class ExperienceRepository:
             )
             statement = statement.order_by(order, ExperienceRow.id.asc())
             statement = statement.offset(offset).limit(limit)
-            experiences = [_to_domain(row) for row in session.execute(statement).scalars().all()]
+            # Annotated rather than left to inference: `statement` is `Select[Any]`, so
+            # the row type mypy derives from `.scalars().all()` depends on which
+            # SQLAlchemy stubs are installed. CI installs a different set than a
+            # developer machine can, and the same source inferred as `Any` in one
+            # environment and stayed unresolved in the other -- a type check that
+            # passes only on some machines is not a type check.
+            rows: Sequence[ExperienceRow] = session.execute(statement).scalars().all()
+            experiences = [_to_domain(row) for row in rows]
         return experiences
 
     def count(
@@ -173,6 +180,24 @@ class ExperienceRepository:
                 statement = statement.where(ExperienceRow.status != _DEPRECATED)
             statement = statement.order_by(ExperienceRow.created_at.asc(), ExperienceRow.id.asc())
             experiences = [_to_domain(row) for row in session.execute(statement).scalars().all()]
+        return experiences
+
+    def get_many(self, experience_ids: Sequence[str]) -> dict[str, Experience]:
+        """Load several experiences by id in one query, keyed by id.
+
+        Added for the Milestone 7 analytics, which needs the record behind every id
+        in a report -- and asking per id would be the N+1 that round-7 brief section
+        56 rules out. Ids that do not exist are simply absent, so a caller that needs
+        to distinguish "missing" from "present" can use ``len()``.
+        """
+        if not experience_ids:
+            return {}
+        experiences: dict[str, Experience]
+        with self._database.session("load experiences by id") as session:
+            statement = select(ExperienceRow).where(ExperienceRow.id.in_(list(experience_ids)))
+            experiences = {
+                row.id: _to_domain(row) for row in session.execute(statement).scalars().all()
+            }
         return experiences
 
 

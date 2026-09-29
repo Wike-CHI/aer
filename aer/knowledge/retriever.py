@@ -46,9 +46,19 @@ from aer.knowledge.models import (
 from aer.runtime.enums import ExperienceKind, ExperienceStatus, RetrievalMode
 from aer.runtime.serialization import utc_now
 
-__all__ = ["ExperienceRetriever", "RetrievalPolicy"]
+__all__ = ["RETRIEVAL_POLICY_VERSION", "ExperienceRetriever", "RetrievalPolicy"]
 
 logger = logging.getLogger(__name__)
+
+#: Version of the retrieval policy encoded above.
+#:
+#: Bumped whenever the meaning of a mode changes -- which filters it applies, which
+#: kinds may appear as guidance, and so on. Recorded on every retrieval session
+#: (round-7 brief, section 59) so that "why did this experience come back then?"
+#: stays answerable after the policy has moved on. It is deliberately a plain string
+#: in the recorded row rather than an enum: an old value has to remain readable by a
+#: new build.
+RETRIEVAL_POLICY_VERSION = "1"
 
 #: Kinds that can ever be guidance. ``FAILURE`` is not among them, by construction
 #: rather than by a flag (round-6 brief, section 33).

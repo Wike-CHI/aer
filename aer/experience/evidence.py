@@ -154,6 +154,23 @@ class RunEvidence(BaseModel):
         """Whether a human said anything about this run."""
         return bool(self.human_feedback_events)
 
+    @property
+    def outcome_declared(self) -> bool:
+        """Whether anyone actually declared how this run ended.
+
+        A run's status is a *declaration*: ``SUCCESS`` means the agent said it was done,
+        ``FAILED`` that it said it was not. ``INCONCLUSIVE`` is the one status that
+        declares nothing -- the run is over and no participant said how it went -- and
+        this property is exactly that distinction, asked by name so the policy and the
+        classifier cannot drift apart on it.
+
+        It reads the status rather than a metadata flag because the status **is** the
+        fact. An earlier revision of this milestone recorded the same thing as a
+        run-metadata key, which left two representations of one truth; the key is gone
+        and the status is authoritative (round-8.1.1, D-100).
+        """
+        return self.run.status is not RunStatus.INCONCLUSIVE
+
     # -- trajectory shape --------------------------------------------------
 
     @property

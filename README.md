@@ -907,3 +907,9 @@ python scripts/probe_codex_hooks.py --use-auth # 需要一次真实回合（会�
 在数据里长得一样——把缺口写出来，才能区分这两种情况。
 
 完整说明、覆盖矩阵与安装步骤见 [`docs/CODEX_ADAPTER.md`](docs/CODEX_ADAPTER.md)。
+
+## MCP 接入
+
+可选 MCP 接入层提供 stdio 和需 Bearer 认证的 HTTP 传输，复用现有 SDK。
+安装与客户端配置、验证器配置及验收边界见 [docs/MCP_ACCESS.md](docs/MCP_ACCESS.md)。
+当前聊天会话需由客户端配置连接后才会获得工具；代码安装不等于自动挂载。

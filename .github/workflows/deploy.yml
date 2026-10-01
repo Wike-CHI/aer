@@ -135,7 +135,7 @@ jobs:
       - name: Install the package with its dev and knowledge extras
         run: |
           python -m pip install --upgrade pip
-          python -m pip install --editable '.[dev,knowledge]'
+          python -m pip install --editable '.[dev,knowledge,mcp]'
 
       # Mirrors the CI job. Without this the knowledge-engine tests would skip
       # here -- there is no NeuG wheel for the platforms CI might otherwise run on,

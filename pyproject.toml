@@ -65,6 +65,8 @@ dependencies = [
 # every platform. Contributors who want the engine tests (and CI, which runs them)
 # ask for `.[dev,knowledge]`.
 knowledge = ["neug==0.2.0"]
+# Optional transport only; embedded SDK keeps its existing dependency footprint.
+mcp = ["mcp>=1.30,<2"]
 
 dev = [
     "pytest>=8.0",
@@ -159,4 +161,8 @@ show_error_codes = true
 # error codes would otherwise have to be silenced in the same file.
 [[tool.mypy.overrides]]
 module = ["neug", "neug.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["mcp", "mcp.*", "starlette", "starlette.*", "uvicorn"]
 ignore_missing_imports = true

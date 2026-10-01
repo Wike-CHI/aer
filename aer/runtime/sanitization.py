@@ -34,6 +34,14 @@ FALLBACK_REPR_MAX_LENGTH = 4096
 #: is an audit field, not a blob store.
 MESSAGE_MAX_LENGTH = 4096
 
+#: Cap on a stack trace that came from *outside* AER (Milestone 8).
+#:
+#: The in-process path does not cap tracebacks: AER produced them, and a traceback is
+#: bounded by the interpreter's own frames. An adapter-received trace is different --
+#: it is a string a vendor sent us, possibly a few megabytes of build log pasted into
+#: a ``stack`` field -- so it is capped with an explicit marker rather than trusted.
+EXTERNAL_STACK_TRACE_MAX_LENGTH = 16_384
+
 #: A token-like unquoted value, but not the prefix of a longer expression.
 #: The negative lookahead stops ``password = os.environ["X"]`` (a source line in a
 #: stack trace) from being treated as a credential assignment.
@@ -79,6 +87,87 @@ def redact(text: str) -> str:
     for pattern, replacement in _SECRET_PATTERNS:
         text = pattern.sub(replacement, text)
     return text
+
+
+#: Substrings that make a key name unambiguous about holding a credential.
+#:
+#: Checked as substrings because these words have no innocent uses: nothing legitimate
+#: is called ``authorization_header`` except an authorization header.
+_CONTAINS_SECRET_KEYS: tuple[str, ...] = (
+    "authorization",
+    "password",
+    "passwd",
+    "credentials",
+    "apikey",
+    "secretkey",
+    "privatekey",
+    "cookie",
+)
+
+#: Short or ambiguous key names that must match exactly.
+#:
+#: ``auth``, ``token`` and ``secret`` live here rather than above because they are
+#: plausible parts of unrelated names -- matching them as substrings would redact an
+#: ``author`` or count keys called ``token_count``.
+_EXACT_SECRET_KEYS: frozenset[str] = frozenset(
+    {
+        "auth",
+        "apikey",
+        "accesstoken",
+        "accesskey",
+        "bearer",
+        "credential",
+        "credentials",
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "signature",
+        "signingkey",
+        "token",
+        "idtoken",
+        "refreshtoken",
+        "sessionkey",
+    }
+)
+
+#: Suffixes that make a key name a credential however it is prefixed.
+_SECRET_KEY_SUFFIXES: tuple[str, ...] = (
+    "accesstoken",
+    "apikey",
+    "cookie",
+    "credential",
+    "credentials",
+    "password",
+    "passwd",
+    "privatekey",
+    "secret",
+    "signingkey",
+    "token",
+)
+
+
+def is_secret_key(name: str) -> bool:
+    """Whether a key's *value* is a credential by virtue of what the key is called.
+
+    Value-shape redaction (:func:`redact`) catches ``api_key=abc123`` written into a
+    string. It cannot catch the same thing structured as ``{"api_key": "abc123"}``,
+    because ``abc123`` on its own has no recognizable shape. This is that missing half,
+    and the two are always used together.
+
+    Deliberately conservative in the ambiguous cases: ``author`` is not a credential,
+    and neither is a key called ``token_count``. A false positive silently destroys
+    real data, which is worse than a missed redaction that the shape rules may still
+    catch.
+    """
+    normalized = re.sub(r"[^a-z0-9]", "", name.casefold())
+    if not normalized:
+        return False
+    if normalized in _EXACT_SECRET_KEYS:
+        return True
+    if any(hint in normalized for hint in _CONTAINS_SECRET_KEYS):
+        return True
+    return normalized.endswith(_SECRET_KEY_SUFFIXES)
 
 
 def truncate(text: str, max_length: int) -> str:

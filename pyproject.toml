@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aer-runtime"
-version = "0.6.1"
+version = "0.8.1"
 description = "AER - Agent Experience Runtime (SQLite lightweight edition)"
 readme = "README.md"
 requires-python = ">=3.12"

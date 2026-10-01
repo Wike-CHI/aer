@@ -95,6 +95,43 @@ class TestCompletion:
         assert stored.status is expected
         assert stored.ended_at is not None
 
+    def test_an_inconclusive_run_is_terminal(self, aer: AER) -> None:
+        """``INCONCLUSIVE`` closes the run without claiming anything about the work.
+
+        It has no convenience method on purpose: ``success`` / ``fail`` / ``abort`` are
+        the *declaration* API, used by code that knows what happened. This status exists
+        for the opposite situation -- an integration that knows the session ended and
+        nothing more -- so it is reached through :meth:`finish` (D-100).
+        """
+        context = aer.start_run(task="session ended, nobody said how")
+
+        run = context.finish(RunStatus.INCONCLUSIVE)
+
+        assert run.status is RunStatus.INCONCLUSIVE
+        assert run.is_finished is True
+        assert run.ended_at is not None
+        assert context.is_finished is True
+        assert [event.event_type for event in aer.get_events(context.run_id)] == [
+            EventType.TASK_START,
+            EventType.TASK_END,
+        ]
+
+    def test_an_inconclusive_run_still_refuses_further_agent_actions(self, aer: AER) -> None:
+        """Terminal means terminal: it is a finished run, not a paused one."""
+        context = aer.start_run(task="session ended, nobody said how")
+        context.finish(RunStatus.INCONCLUSIVE)
+
+        with pytest.raises(RunStateError):
+            context.finish(RunStatus.SUCCESS)
+        with pytest.raises(RunStateError):
+            context.tool("wordpress.update_page")
+
+    def test_running_is_not_a_status_you_can_finish_with(self, aer: AER) -> None:
+        context = aer.start_run(task="task")
+
+        with pytest.raises(RunStateError, match="not a terminal run status"):
+            context.finish(RunStatus.RUNNING)
+
     @pytest.mark.parametrize(
         "method",
         ["success", "partial_success", "fail", "abort"],

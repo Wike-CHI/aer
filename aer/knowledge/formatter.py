@@ -25,10 +25,20 @@ from aer.runtime.enums import ExperienceKind
 
 __all__ = [
     "DEFAULT_MAX_CHARS",
+    "FORMATTER_VERSION",
     "PREAMBLE",
     "TRUNCATION_MARKER",
     "ExperienceContextFormatter",
 ]
+
+#: Version of the rendering produced by this module.
+#:
+#: Recorded on every injection (round-7 brief, section 58) because the same
+#: experience presented differently may land differently: a labelling change, a new
+#: section or a different budget all alter what the agent read. Comparing the
+#: effectiveness of two formatter versions later requires knowing which one produced
+#: each injection, and no amount of storage archaeology recovers that after the fact.
+FORMATTER_VERSION = "1"
 
 #: Default character budget for a rendered context.
 #:
@@ -86,16 +96,23 @@ class ExperienceContextFormatter:
 
         blocks: list[str] = []
         for hit in result.guidance:
-            blocks.append(self._format_hit(hit))
+            blocks.append(self.format_hit(hit))
         for hit in result.warnings:
-            blocks.append(self._format_hit(hit))
+            blocks.append(self.format_hit(hit))
 
         body = "\n\n".join(blocks)
         rendered = f"{PREAMBLE}\n\n{body}"
         return self._fit(rendered)
 
-    def _format_hit(self, hit: RetrievalHit) -> str:
-        """One labelled block, with only the sections that apply."""
+    def format_hit(self, hit: RetrievalHit) -> str:
+        """One labelled block, with only the sections that apply.
+
+        Public because injection tracking has to record how many characters *this*
+        experience occupied (round-7 brief, section 19), and the only honest way to
+        know that is to ask the renderer rather than to divide the total by the
+        number of hits. It is also the seam a caller uses to show one record without
+        rendering the whole result.
+        """
         lines = [f"[{hit.label}]"]
         lines.append(f"Problem: {_one_line(hit.problem)}")
 

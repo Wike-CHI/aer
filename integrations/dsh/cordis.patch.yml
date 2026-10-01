@@ -1,0 +1,22 @@
+# The AER DSH adapter bundle patch.
+#
+# A bundle joins a profile's layer stack by declaring `dsh.bundle.patch` in its
+# package.json; this file is that patch, and it mounts exactly one row: the adapter
+# plugin itself.
+#
+# Everything environment-specific arrives through environment variables, so this file
+# stays identical on a workstation, in CI and in a container. The plugin's own defaults
+# are sane for a checkout; a deployment overrides them from its profile overlay rather
+# than editing this file, because a committed absolute path is a bug waiting for the
+# second machine.
+- insert:
+    - id: aer-dsh-adapter
+      name: '@aer/dsh-adapter'
+      config:
+        python: !!js process.env.AER_DSH_PYTHON
+        cwd: !!js process.env.AER_DSH_CWD
+        args: !!js (process.env.AER_DSH_ARGS ?? '-m aer.adapter.dsh.bridge').split(' ')
+        # Loading the plugin without a bridge is a supported mode: it makes the
+        # wiring probe (`--dump-config` plus a boot with no AER running) able to
+        # answer "does the plugin load" without also requiring a deployment.
+        enabled: !!js process.env.AER_DSH_ENABLED !== '0'

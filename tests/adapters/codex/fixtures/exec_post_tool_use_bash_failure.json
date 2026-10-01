@@ -1,0 +1,15 @@
+{
+  "session_id": "session-0004",
+  "turn_id": "turn-0005",
+  "transcript_path": "C:\\codex-home\\sessions\\2026\\09\\20\\rollout-PLACEHOLDER.jsonl",
+  "cwd": "C:\\work\\failing-repo",
+  "hook_event_name": "PostToolUse",
+  "model": "gpt-5.6-luna",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "python check.py"
+  },
+  "tool_response": "Traceback (most recent call last):\n  File \"C:\\work\\failing-repo\\check.py\", line 2, in <module>\n    assert value == 2, f\"expected 2, got {value}\"\n           ^^^^^^^^^^\nAssertionError: expected 2, got 1\n",
+  "tool_use_id": "tool-0007"
+}

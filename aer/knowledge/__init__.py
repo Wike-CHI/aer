@@ -44,6 +44,7 @@ from aer.knowledge.base import (
 )
 from aer.knowledge.formatter import (
     DEFAULT_MAX_CHARS,
+    FORMATTER_VERSION,
     PREAMBLE,
     ExperienceContextFormatter,
 )
@@ -67,7 +68,11 @@ from aer.knowledge.projector import (
     RebuildReport,
 )
 from aer.knowledge.query import fts_expression, query_terms
-from aer.knowledge.retriever import ExperienceRetriever, RetrievalPolicy
+from aer.knowledge.retriever import (
+    RETRIEVAL_POLICY_VERSION,
+    ExperienceRetriever,
+    RetrievalPolicy,
+)
 from aer.knowledge.schema import (
     EXPERIENCE_INDEXED_PROPERTIES,
     FTS_PROPERTY_WEIGHTS,
@@ -80,12 +85,14 @@ __all__ = [
     "DEFAULT_MAX_CHARS",
     "DEFAULT_RETRIEVAL_LIMIT",
     "EXPERIENCE_INDEXED_PROPERTIES",
+    "FORMATTER_VERSION",
     "FTS_PROPERTY_WEIGHTS",
     "KNOWN_FAILURE_LABEL",
     "MAX_RETRIEVAL_LIMIT",
     "MIN_RETRIEVAL_LIMIT",
     "PREAMBLE",
     "PROJECTION_SCHEMA_VERSION",
+    "RETRIEVAL_POLICY_VERSION",
     "UNVERIFIED_STATUS_ORDER",
     "VERIFIED_STATUSES",
     "VERIFIED_STATUS_ORDER",

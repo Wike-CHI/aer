@@ -2837,6 +2837,1047 @@ ImportError"——一个只在生产才出现的失败。所以必须同时改�
 
 ---
 
+## D-066 Usage 是行为事实，存 SQLite；NeuG 本轮保持只读
+
+**时间**：2026-09-20
+**里程碑**：M7
+
+### 背景
+
+M7 要记录"某条经验被检索/注入/采用之后发生了什么"。这些数据天然是**关于 Agent
+行为**的事实，而 AER 已经有两个存储：SQLite（唯一事实源）与 NeuG（可重建投影）。
+
+### 问题
+
+usage 数据放哪？检索时顺手改 NeuG 上的 `reuse_count` 不是很自然吗？
+
+### 候选方案
+
+1. 写进 NeuG：检索命中后直接在 Experience Node 上 `reuse_count += 1`。
+2. 写进 SQLite 的独立表，NeuG 完全不动。
+3. 两边都写，保持"同步"。
+
+### 最终方案
+
+方案 2。新增 `retrieval_sessions` 与 `experience_usage` 两张 SQLite 表；NeuG 在
+M7 的检索、注入、记账路径上**一个字节都不写**。
+
+### 理由
+
+- **它回答的不是同一个问题**。NeuG 回答"哪条经验与当前问题相关"；usage 回答
+  "Agent 到底用了没有"。把后者塞进检索索引，等于让一个可丢弃的副本承担不可丢弃的
+  事实。事实一旦只在索引里，`rebuild` 就会把它抹掉——而 rebuild 被明确设计为
+  "随时可做、无损失"（D-058）。
+- **"检索命中即 +1"是错误归因**。检索结果没人渲染、或者渲染了但 Agent 没看，都
+  不是使用。把它写成 `reuse_count += 1`，等于用一个计数器把本轮要消灭的混淆固化
+  下来。
+- 方案 3 更糟：跨库没有分布式事务（D-057），"两边都写"只是把一个不一致问题变成
+  两个。
+
+### 代价与必须同步的改动
+
+- `experience_usage.experience_id` 外键指向 `experiences.id`：索引返回一条 SQLite
+  里已经不存在的经验时，写入会以 FK 失败。这是**想要的**——那说明投影已经漂移，
+  应该报错并 rebuild，而不是为幽灵经验记一笔使用。
+- `retrieval_sessions.run_id` 用 `ON DELETE SET NULL`：Run 被删掉时，检索记录本身
+  仍然成立（它是一次真实发生过的搜索），只是变成"未归属"，报告里单独计数。
+
+### 验证方式
+
+`tests/usage/test_retrieval_sessions.py`、`tests/usage/test_usage_rows.py`；
+以及 `conftest` 里注入的 `RecordingIndex`：整个测试套件可以断言索引**一次都没被
+当成事实源写过**。
+
+### 重新评估触发条件
+
+- 需要在**不查询 SQLite**的前提下做 usage 分析（例如另一个只读分析进程）；
+- 或者 usage 数据量增长到 SQLite 聚合成为瓶颈（届时先考虑物化视图，仍不是 NeuG）。
+
+---
+
+## D-067 `retrieve()` 保持纯读，新增显式 tracked retrieval
+
+**时间**：2026-09-20
+**里程碑**：M7
+
+### 背景
+
+有了 usage 表，最省事的做法是让 `retrieve()` 顺手写一条 session。
+
+### 问题
+
+所有搜索都记账，会不会污染数据？
+
+### 候选方案
+
+1. `retrieve()` 默认记账。
+2. `retrieve()` 保持纯读，另加 `retrieve_for_run()` 显式记账。
+3. 加一个全局开关 `AER(track_retrieval=True)`。
+
+### 最终方案
+
+方案 2。`retrieve()` 签名与语义完全不变（无 Usage 副作用）；
+`aer.retrieve_for_run(...)` 返回 `TrackedRetrievalResult(session_id, result)`。
+
+### 理由
+
+- **搜索本身是有价值的纯函数能力**。管理后台检索、排障检索、测试查询都是真实的
+  检索需求，它们**不是** Agent Usage。让它们默认写库，等于用一个开关决定统计数据
+  是否可信，而那个开关没人会记得关。
+- **边界必须一眼可见**。读到 `retrieve()` 的人知道它不写；读到 `retrieve_for_run()`
+  的人知道它写。这比一个需要查配置才知道行为的 `retrieve()` 好。
+- 方案 3 把显式性从**调用点**挪到了**进程配置**，方向相反：同一份代码在两种配置下
+  行为不同，而调用点看不出来。
+
+### 代价
+
+调用方多写一个方法名。测试里 `retrieve()` 的既有行为一个字都不用改。
+
+### 验证方式
+
+`tests/usage/test_retrieval_sessions.py::TestPureRetrievalStaysPure`
+——纯检索后 `retrieval_sessions.count() == 0`；
+并且 tracked 与 untracked 返回**同一个结果**（记账不能改变答案）。
+
+### 重新评估触发条件
+
+- 出现"所有检索都必须可审计"的合规要求时（那也应该是一个显式包装层，不是改默认值）。
+
+---
+
+## D-068 Retrieved / Injected / Adopted / Helpful 四态分离
+
+**时间**：2026-09-20
+**里程碑**：M7
+
+### 背景
+
+最直觉的统计是"经验 A 被用了 7 次，其中 6 次成功，所以 A 成功率 86%"。
+
+### 问题
+
+"被用"到底指哪一件事？
+
+### 候选方案
+
+1. 一个布尔 `used`，外加 `task_success`。
+2. 四个独立状态：retrieved / injected / usage_signal / utility_label。
+3. 自动推断：Agent 后来的工具调用与经验里的步骤相似就记为 adopted。
+
+### 最终方案
+
+方案 2，并把四个状态各自落成独立列。
+
+### 理由
+
+四个区别各自会以不同方式骗人：
+
+```text
+Retrieved ≠ Injected   检索出 5 条、只渲染 2 条时，"被检索 5 次"没有意义
+Injected  ≠ Adopted    进了上下文和真正被采纳是两件事；只说前者会把噪声算成使用
+Adopted   ≠ Helpful    Agent 完全可能采用了一条错误的经验
+Success   ≠ Caused     任务成功完全可能因为 Agent 自己解决了（section 14 的反例）
+```
+
+**最关键的是最后一条**：如果系统因为 "A 被注入 + Run SUCCESS" 就写
+`A = HELPFUL`，那它产出的就是**错误的训练信号**——而 AER 存在的意义恰恰是不要
+制造这种信号。方案 3 则更彻底地把猜测写成事实，本轮明确禁止。
+
+### 代价
+
+`experience_usage` 列更多，报告更长，`UNKNOWN` 会成为最常见的值。这是**正确的
+代价**：绝大多数使用确实不可知，schema 应该如实反映这一点，而不是用一个猜测填空。
+
+### 验证方式
+
+`tests/usage/test_effectiveness.py::TestCriticalAttributionIgnoredButSuccessful`
+——injected + IGNORED + verified success：retrieval_count / injection_count 增 1，
+adoption_count 不变，`helpful_count == 0`，且 adoption 成功率仍为 `None`。
+
+### 重新评估触发条件
+
+- 出现可靠的 **inferred adoption** 证据（带置信度）时——那时它是第五个来源，
+  不是把 UNKNOWN 改写成 ADOPTED 的理由。
+
+---
+
+## D-069 usage_signal 必须显式且带来源，冲突只能显式 override
+
+**时间**：2026-09-20
+**里程碑**：M7
+
+### 背景
+
+`usage_signal = UNKNOWN / ADOPTED / IGNORED / REJECTED`，`utility_label =
+UNKNOWN / HELPFUL / NEUTRAL / HARMFUL`。
+
+### 问题
+
+谁来写？写错了怎么办？
+
+### 候选方案
+
+1. Adapter 自动扫描 trace 推断。
+2. 只有显式 API 调用能写，且必须带 source。
+3. 允许任意覆盖，最后写入者获胜。
+
+### 最终方案
+
+方案 2，并加两条约束：
+
+```text
+UNKNOWN ↔ 任何确定值：允许
+相同值重复写：幂等（不报错、不改时间戳）
+确定值 → 另一个确定值：拒绝，除非 override=True
+```
+
+### 理由
+
+- **UNKNOWN 是有信息量的值**，不是待办事项。把 UNKNOWN 自动填成 ADOPTED，等于用
+  推断消灭了"我们并不知道"这个事实，而后续所有统计都建立在它之上。
+- **来源缺失使证据不可审计**。同一个 ADOPTED，来自 AGENT 和来自 HUMAN 的可信度
+  完全不同；不记录来源，将来就无法"让人类反馈覆盖低可信 Agent 反馈"（section 54）。
+  因此 `signal != UNKNOWN` 与 `source is not None` 是**同时成立或同时不成立**的，
+  由模型校验器强制。
+- 方案 3 会让一句话被后写的一句话悄悄改写。"ignored 变成 adopted" 是本表能收到的
+  最有害的一次写入，必须显式。
+
+### 代价
+
+Adapter 要多做一次显式调用；人可能永远不写 utility，于是 `feedback_component`
+长期取中性值 0.5。这是诚实的中性，不是缺陷。
+
+### 验证方式
+
+`tests/usage/test_signals.py`：三种 UNKNOWN→X、幂等、四种冲突拒绝、override 放行、
+来源必须配对的四个方向。
+
+### 重新评估触发条件
+
+- 引入带置信度的 `inferred adoption` 时（届时它是一个新的 source，而不是覆盖）。
+
+---
+
+## D-070 REUSED 与 PROVEN 分离；来源 Run 不算 reuse
+
+**时间**：2026-09-20
+**里程碑**：M7
+
+### 背景
+
+旧设计（本文件之外的早期草稿与 `TASKS.md` 原 Task 7.4）写的是：
+`VERIFIED → REUSED` 只需"被其他 Run 注入一次"，`REUSED → PROVEN` 只需
+`reuse_count >= 5 且 success_rate >= 0.80`。
+
+### 问题
+
+这套规则能被"刷"出来。
+
+### 候选方案
+
+1. 沿用旧规则（数量 + 成功率）。
+2. 两级：REUSED 只要求真实复用；PROVEN 要求 **adoption 信号** + 多个不同 Run 的
+   verified success + 无 harmful。
+3. 只有一级（不做区分）。
+
+### 最终方案
+
+方案 2。默认阈值（`PromotionPolicy`，全部可配置）：
+
+```text
+REUSED : 注入到至少一个 != source run 的真实 Run（不要求成功）
+PROVEN : status >= REUSED
+         distinct adopted runs          >= 5
+         adopted verified successes     >= 4
+         adopted verified success rate  >= 0.80
+         harmful feedback               == 0
+```
+
+### 理由
+
+- **"被检索"不是 reuse**，**"被自己的 source run 注入"也不是**。经验从 Run A 提炼
+  出来，再注入回 Run A，是它唯一被保证相关的场景；用它证明"这条经验能泛化"是循环
+  论证。
+- **REUSED 不要求成功**。`REUSED` 只表示"被真正再次使用过"，不是 `PROVEN`。Run B
+  失败并不改变"这条经验确实被用过"这个事实。
+- **PROVEN 必须要求 adoption 信号**。如果全部是 `UNKNOWN`，系统甚至不知道 Agent
+  有没有看这条经验（section 38）；此时允许 `REUSED`，但**默认不得自动 PROVEN**。
+  光靠"被注入很多次"升级，衡量的是检索器的行为，不是经验的价值。
+- **harmful 一票否决**。成功率再高也不能把一条被明确报告有害的经验推上 PROVEN，
+  必须人工处理。
+- **PROVEN 仍然不是因果证明**。它的准确语义是"在多个真实任务中被明确采用，并与
+  多次 verified success 共现"（section 39）。
+
+### 代价
+
+达到 PROVEN 需要真实、显式、跨任务的采用信号，所以绝大多数经验会长期停在
+`VERIFIED` 或 `REUSED`。这是正确的：`PROVEN` 应该是稀缺的。
+
+### 验证方式
+
+`tests/usage/test_promotion.py`：来源 Run 不算（71）、阈值少一项都不行（72）、
+harmful 阻止（73）、全 UNKNOWN 只能到 REUSED（38）、adopted + failure 不得升级（70）。
+
+### 重新评估触发条件
+
+- 出现 Adapter 能稳定、可靠地提交 adoption 信号之后，阈值才有意义再调；
+- 或者引入随机 holdout（D-071）之后，`PROVEN` 的判据可以从"共现"升级为"增量"。
+
+---
+
+## D-071 `observed_success_rate` 命名即边界：相关性不是因果
+
+**时间**：2026-09-20
+**里程碑**：M7
+
+### 背景
+
+报告里最重要的一个数字是"这条经验在被用到的时候，任务成功率是多少"。
+
+### 问题
+
+这个数字该叫什么？
+
+### 候选方案
+
+1. `effectiveness` / `success_rate` / `effect`。
+2. `observed_success_rate`（并单独提供 `injected_verified_success_rate` /
+   `adopted_verified_success_rate`）。
+
+### 最终方案
+
+方案 2。
+
+```text
+P(success | experience injected)
+≠
+P(success | do(experience injected))
+```
+
+### 理由
+
+- 方案 1 的名字会让读者（包括未来的我们自己）把它当成因果结论。它**不是**：
+  经验更可能被检索到的任务，可能本来就是更常见、更容易的任务。
+- 第一版分母只包含"已 Injected 且 target run 最终有 Verification"的 run，并
+  **单独**报告 adoption 子集，两个口径不混合（section 29）。
+- **UNVERIFIED 不算 failure，也不进分母**。否则越少被验证的经验看起来越差，这会
+  系统性地惩罚"没人给它做验证"的经验。
+- **Outcome 不重复落库**：usage 表里不存 `task_success`，统计时从 `runs` +
+  `verifications` 派生。存副本会带来"Run 变了、副本过期"的经典问题（section 25）。
+
+### 代价
+
+没有单一"效果分"可以展示。正确。
+
+### 验证方式
+
+`tests/usage/test_effectiveness.py`（五种 outcome 分别计数、UNVERIFIED 不进分母）；
+`tests/integration/test_experience_usage_effectiveness.py::TestNegativeScenario`
+（1 成功 + 1 失败 = 0.5，且不足以升级）。
+
+### 重新评估触发条件
+
+- 引入 randomized holdout 之后：届时可以开始谈论**增量**效果，但仍然要保留
+  观察口径的原名（`experiment_id` / `assignment` 字段已预留）。
+
+---
+
+## D-072 Confidence 确定性、可拆解、按需计算、不写回
+
+**时间**：2026-09-20
+**里程碑**：M7
+
+### 背景
+
+`experiences.confidence` 自 M5 起固定 `0.0`，理由是"没有复用数据就无法校准"
+（D-037）。
+
+### 问题
+
+现在有了 usage 数据，要不要开始写 confidence？
+
+### 候选方案
+
+1. 每次写入 expertise 或每次检索时顺手更新 confidence 列。
+2. 存一个由 LLM 打分得到的"综合分"。
+3. 按需计算，返回**分解后的分量**，不落库。
+
+### 最终方案
+
+方案 3。
+
+```text
+confidence = 0.30 * verification + 0.25 * reuse + 0.25 * outcome
+           + 0.10 * feedback     + 0.10 * freshness
+```
+
+### 理由
+
+- **"没人维护的列会过期"**，这正是 D-037 拒绝加计数器的理由，对 confidence 同样
+  成立。写入路径越多，越容易漏掉一条。
+- **可拆解比精确更重要**。返回五个分量，任何数字都能解释；一个 0.73 的综合分既不
+  能解释也不能复核（section 42）。
+- **确定性是可测试性**：同样证据 + 同样时钟 => 同样数值，逐位相等。因此禁止 LLM
+  参与打分（section 74）。
+- `freshness` 是唯一依赖"何时提问"的输入，这一点在文档和测试里都写明——它是度量的
+  性质，不是缺陷。
+- 不写回还有一个附带好处：它**不触发 NeuG 投影**。投影 schema 里没有 confidence，
+  检索也不需要它。
+
+### 代价
+
+每次询问都要重算（一次报告 + 一次查询，都是批量查询）。对嵌入式单进程场景可忽略。
+
+### 验证方式
+
+`tests/usage/test_confidence.py`：分量加权重现总分、固定时钟下跨重启逐位相等、
+计算不写 `experiences`、weights 校验。
+
+### 重新评估触发条件
+
+- 需要在**没有 SQLite 的进程**里展示 confidence 时（那时可以物化，但仍要保留
+  recompute 操作）；
+- 或者 confidence 参与排序（届时要先解决 D-037 里"不要用未校准数字影响检索"的问题）。
+
+---
+
+## D-073 0 结果也记录 session；query 必须 sanitized；同一检索内经验唯一
+
+**时间**：2026-09-20
+**里程碑**：M7
+
+### 背景
+
+三条看起来很小、但决定数据能否被信任的规则。
+
+### 最终方案
+
+```text
+1. result_count = 0 的检索同样写 session。
+2. query_text 只存 sanitized 形式（redact + 折叠空白 + 截断到 512 字符）。
+3. UNIQUE(retrieval_session_id, experience_id)。
+```
+
+### 理由
+
+- **"查过但没有"和"根本没查"是两种不同状态**。前者说明知识库有缺口（这是最有价值
+  的运维信号之一），后者什么都不说明。只存成功检索会让前者永远不可见。
+- **query 由 Agent 上下文派生，可能含凭据**。只存检索问题本身，不存 prompt /
+  conversation / tool output；`query_fingerprint` 从 **sanitized 之后**的文本派生，
+  这样粘进来的 token 不会改变分组键，指纹本身也可以安全打日志。
+- **唯一约束是数据库那一半的保证**。同一条经验在一次检索里出现两次不是"数量"，
+  是检索器把一个记录放在了两个槽位里。UNIQUE 把它变成一次响亮的写入失败，而不是
+  一个被悄悄翻倍的统计数字。
+
+### 代价
+
+长 query 会被截断（只影响**记录**，检索仍用调用方原文——见 D-067 的测试：记账不得
+改变答案）。罕见情况下（检索器返回重复记录）会直接报错——这是想要的。
+
+### 验证方式
+
+`tests/usage/test_retrieval_sessions.py::TestZeroResults` / `TestTheQueryIsSanitized`；
+`tests/usage/test_usage_rows.py::TestADuplicateIsRefused`。
+
+### 重新评估触发条件
+
+- 如果 `query_text` 的截断被证明丢掉了有用的上下文（例如需要按完整 query 复现
+  检索），先考虑单独存一个受限长度的指纹维度，而不是把原文写进去。
+
+---
+
+## D-074 本轮不做 Dataset / Training / Adapter
+
+**时间**：2026-09-20
+**里程碑**：M7
+
+### 背景
+
+usage 数据齐了之后，最诱人的下一步是"直接导出训练集"。
+
+### 问题
+
+为什么不做？
+
+### 最终方案
+
+M7 只积累**可靠的 Usage Evidence**：
+
+```text
+不建 Dataset Builder，不导出 preference dataset，不做 SFT / DPO / RL
+不做 Workflow Promotion
+不做 A/B 实验框架
+不做 Dashboard / FastAPI
+不做 Agent Adapter（Codex / Claude / Cursor / DSH）
+不引入 HNSW / Embedding / Vector Retrieval
+不把 usage 投影进 NeuG
+不自动推断 adoption
+```
+
+### 理由
+
+- **`PROVEN` 不是训练数据**，它只是 Experience 生命周期里的一个状态。训练候选还需
+  要 Dataset Quality Gate、Safety、Dedup 与 **Holdout separation**（sections 80-81）。
+  用 `PROVEN` 直接喂训练，等于把"共现"当成"因果"（D-071），并制造 eval 泄漏
+  （同一批数据既训练又评测）。
+- **Adapter 是下一个里程碑，不是这一轮的一部分**。它需要的是协议设计（如何提交
+  decision summary 而不提交 chain-of-thought），而这轮先把它要写的表建好。
+- 本轮**为 Adapter 留了接口**（`record_injection` / `record_usage_signal` /
+  `record_utility` / `metadata` 可承载 decision summary），但不实现任何具体 Adapter。
+
+### 代价
+
+Usage 数据会先积累一段时间而没有消费者。这是刻意的：证据先于使用。
+
+### 验证方式
+
+本轮代码里不存在 dataset / training / adapter 模块：`aer/usage/` 不 import 任何
+训练相关库，`pyproject.toml` 的依赖列表没有增加。
+
+### 重新评估触发条件
+
+M8（Agent Adapter Protocol）完成后，再评估 Dataset Builder；在此之前任何"顺手导出
+数据集"的改动都应先改这一条决策。
+
+---
+
+## D-075 分层：Adapter 只做翻译，AER Core 不认识任何厂商格式
+
+**时间**：2026-09-20
+**里程碑**：M8
+
+### 背景
+
+AER 的价值来自它能学到的**真实执行量**，而那个量在别人的 Agent 里（Codex、
+Claude Code、Cursor、DSH、内部 Agent）。没有协议时，每个接入都是一段伸手进 AER
+内部的定制脚本。
+
+### 问题
+
+厂商事件要不要直接映射成 AER 事件？
+
+### 候选方案
+
+1. 为每个厂商新增 EventType，Core 直接理解各家格式。
+2. 定义 Agent Adapter Protocol：Adapter 把厂商负载翻译成协议 envelope，Core 只
+   认识协议。
+3. 让 Adapter 直接写 Repository，绕开 Runtime。
+
+### 最终方案
+
+方案 2。Adapter 只负责 **Translate / Normalize / Sanitize / Associate**；
+Distillation、Verification Policy、Ranking、Promotion、Dataset 全部留在 AER。
+
+### 理由
+
+- **方案 1 会让 Core 被厂商牵着走**。每来一个平台就多一种事件、多一处 if，而
+  AER 的检索与统计建立在事件语义稳定之上；一旦事件含义随厂商漂移，历史数据就
+  不可比较。
+- **方案 3 会绕掉三个必须保留的东西**：terminal-state guard、单一错误管道、
+  sequence 分配。Adapter 是第三方代码，不能让它有机会把一条已完成的 Run 再改一遍。
+- 协议的存在让**接入成本变成一张翻译表**，而不是一次对 Core 的修改。
+
+### 代价
+
+多一层间接：一个事件要先变成 envelope 才能进 Run。换来的是"第二个 Adapter 不需要
+动 Core"——本轮用两个完全不同风格的假 Agent 证明了这一点（第 60 节验收）。
+
+### 验证方式
+
+`tests/adapters/test_scenarios.py::TestTwoAgentsOneProtocol`：shell 风格与
+structured 风格两个假 Agent 产生**逐条相同**的事件类型序列与语义。
+`aer/` 中不存在任何厂商名。
+
+### 重新评估触发条件
+
+- 某个平台的 hook 能力低到无法用协议表达（那时应该扩展协议，而不是让 Core 认识它）。
+
+---
+
+## D-076 Adapter 只能通过 Runtime API；为此新增 `RunContext.external`
+
+**时间**：2026-09-20
+**里程碑**：M8
+
+### 背景
+
+Adapter 要记录的是外部事件：失败是"被描述"而不是被抛出、recovery 的开始与结束
+分两次到达、人类反馈可能在 Run 结束之后才来。
+
+### 问题
+
+现有 RunContext 的公开 API（`emit` / `tool()` / `recovery()` / `error(exc)`）
+是"同进程、上下文管理器"形状的，直接给 Adapter 用会怎样？
+
+### 候选方案
+
+1. 让 Adapter 直接写 EventRepository。
+2. 让 Adapter 用 `error(exc)` 伪造异常、用 `with run.tool(...)` 手动 enter/exit。
+3. 在 RunContext 上新增一小组**外部事件 API**，语义按外部事件的真实形状定义。
+
+### 最终方案
+
+方案 3。新增 `aer/runtime/external.py` 的 `ExternalEventRecorder`，通过
+`run.external(source="adapter:...")` 获得，提供四个操作：
+
+```text
+event(event_type, ...)                 仅 TOOL_CALL/RESULT、MODEL_CALL/RESULT、HUMAN_FEEDBACK
+failure(error_type, message, stack)    外部失败：由原语构造，不伪造 traceback
+recovery_started(reason, error_id)     写 RECOVERY_START + 落一条 open RecoveryRecord
+recovery_finished(recovery_id, ...)    写 RECOVERY_RESULT + 补完记录 + 成功时 resolve
+```
+
+### 理由
+
+- 方案 1 绕过了 guard、错误管道与 sequence 分配，直接被第 10 节禁止。
+- 方案 2 有两个具体问题：`error(exc)` 会把 **Adapter 自己的调用栈**存成 Agent 的
+  traceback（把集成方的帧记在 Agent 名下）；而 context manager 要求 call/result 成对，
+  一旦进程在两者之间重启，"打开着的上下文"就丢了。第 50–51 节又明确要求重启后可恢复。
+- 四个操作是**外部事件的真实形状**，不是 API 审美的选择：失败有类型和消息但没有
+  `__traceback__`；recovery 的两次投递可能跨越重启；反馈可以晚于终态。
+- `source` 是必填参数：一条不知道来源的事件，事后无法解释（第 38 节）。
+
+### 代价
+
+RunContext 多了一层对外 API（一个方法 + 一个类）。终态守卫仍然是同一个：除
+`HUMAN_FEEDBACK`（系统观察，允许晚到）外，其余一律经过 `emit` 的守卫。
+
+### 验证方式
+
+`tests/adapters/test_ingest.py`（终态守卫、失败语义、recovery 生命周期）；
+`tests/adapters/test_sanitization.py`（provenance 落在每个外部事件上）。
+
+### 重新评估触发条件
+
+- 出现一种无法用这四类表达的外部事实时（先判断它是不是"事件"，还是新的概念）。
+
+---
+
+## D-077 事件型模型：不做 call/result 配对，外部顺序只作元数据
+
+**时间**：2026-09-20
+**里程碑**：M8
+
+### 背景
+
+真实 hook 是**异步事件流**：Tool Result 可能晚于其他事件到达，甚至跨越进程重启。
+
+### 问题
+
+协议要不要要求 Adapter 把 call 与 result 配对成一个"完整动作"再送出？
+
+### 候选方案
+
+1. 要求配对：Adapter 缓冲 Tool Call，等 Result 到了一起送。
+2. 事件型：每条投递独立处理，顺序按到达顺序。
+
+### 最终方案
+
+方案 2。并且：
+
+```text
+AER sequence        = 到达顺序（永不重算）
+external_sequence   = 厂商原值，原样保留在 adapter_events 与事件 metadata
+external_timestamp  = 厂商时钟，原样保留；AER created_at 永远是接收时钟
+```
+
+### 理由
+
+- **配对在真实世界里会卡住**：Result 可能永远不来（进程被杀），缓冲区的 Call 就永远
+  不发；而重启后缓冲区消失，晚到的 Result 变成一个没有开头的结果。
+- **重写 sequence 等于改历史**：把晚到的事件插回它"应该在"的位置，会让已经写下的
+  顺序被追溯修改，而顺序是 trace 的基本语义（第 53 节）。
+- 第 23 节把这件事说得很清楚：推荐按到达顺序编号，**额外**保存外部顺序。
+  两者并存之后，"厂商认为的先后"与"我们收到的先后"都可以读出来。
+
+### 代价
+
+trace 的物理顺序不等于厂商的逻辑顺序。这是信息，不是缺陷——但它必须被写下来，
+所以外部 sequence/timestamp 进了 `adapter_events` 列**和**每条事件的 metadata。
+
+### 验证方式
+
+`tests/adapters/test_ingest.py::TestOrdering`：按 3、1、2 投递，AER 顺序是
+2、3、4，metadata 里保留 3、1、2；厂商时间戳是 1999 也不会影响 `created_at`。
+
+### 重新评估触发条件
+
+- 出现必须按厂商顺序重放的需求时（那应该是一个显式的重放工具，而不是改写入路径）。
+
+---
+
+## D-078 AER 自己生成内部 ID；外部 ID 永不作为主键
+
+**时间**：2026-09-20
+**里程碑**：M8
+
+### 背景
+
+Adapter 会拿到厂商的 session id、run id、event id。
+
+### 问题
+
+直接用它当主键不是更省事？
+
+### 候选方案
+
+1. 外部 ID 作为主键（省一次映射）。
+2. AER 生成内部 ID，外部 ID 只作为普通列 + 唯一约束。
+
+### 最终方案
+
+方案 2。
+
+### 理由
+
+- **外部 ID 的命名空间不由 AER 控制**：厂商可能复用、重排、甚至改格式。一旦它成为
+  主键，厂商的一次变更就会撞进 AER 的身份体系，而这类事故无法在 AER 侧修复。
+- 外部 ID 仍然是**一等证据**：`(provider, external_event_id)` 是幂等的键，
+  `(provider, external_session_id)` 是会话映射的键——它们承担唯一性，只是不承担身份。
+- 第 17 节的原文要求就是这一条。
+
+### 代价
+
+多一层 ID 映射（`adapter_sessions.id` / `adapter_events.id`），多两张表。可忽略。
+
+### 验证方式
+
+`tests/adapters/test_sessions.py`：外部 session id 只是列；`AdapterSession.id`
+由 AER 生成。
+
+### 重新评估触发条件
+
+- 无。这是外部标识进入任何系统的标准做法。
+
+---
+
+## D-079 幂等靠 `adapter_events` 账本：先 claim，后 apply
+
+**时间**：2026-09-20
+**里程碑**：M8
+
+### 背景
+
+真实 hook 会重试，webhook 会重复投递，session 会被重放。同一厂商事件被投递两次时，
+**不能**产生两条 AER Event（第 18 节）。
+
+### 问题
+
+账本怎么用？先写还是后写？放在 `events` 表上还是新表？
+
+### 候选方案
+
+1. 在 `events` 表加 `external_id` 列 + 唯一约束。
+2. 新表 `adapter_events`，先 apply 后记账。
+3. 新表 `adapter_events`，**先 claim（applied=false），再 apply，最后 mark_applied**。
+
+### 最终方案
+
+方案 3。
+
+### 理由
+
+- **方案 1 会动到 trace 的历史语义**（第 19 节的告诫、第 53 节的红线）：`events` 是
+  trace，不该长出一列"某个厂商是怎么编号的"。而且那条唯一约束是**集成**事实，不是
+  trace 事实。
+- **方案 2 在"apply 成功但记账失败"时会重复**：重试看到没有账本行，于是再写一遍。
+  重复的事件会**静默地**污染统计（一次工具调用被算成两次），而这正是 M7 全部工作的
+  输入。
+- 方案 3 把这个窗口反过来：claim 先落，中途崩溃会留下一条 `applied=false` 的行，
+  重试被判为重复。**代价是丢一条事件，而不是多一条**——丢的那条是可查询、可观测的
+  （`adapter_status()["unapplied_events"]`），而多出来的那条不可见。
+- 单进程同步执行（D-061）意味着这个窗口在实践中极窄，但选择哪一种失败方式，是应该
+  写下来的。
+
+### 代价
+
+进程在 claim 与 apply 之间被杀，会丢失那一条外部事件，并且它不会自动重放。
+这是刻意的取舍，用"可观测的缺失"换"不可观测的重复"。
+
+### 验证方式
+
+`tests/adapters/test_idempotency.py`（重复投递、重试风暴、无 id 事件、批量 envelope、
+provider 级命名空间）；`tests/adapters/test_sessions.py::TestRestartPersistence`
+（跨重启仍判重）。
+
+### 重新评估触发条件
+
+- 出现"任何一条外部事件都不能丢"的要求时——那时需要的是 apply 与 claim 的同事务
+  重放机制，而不是把账本顺序换回来。
+
+---
+
+## D-080 外部输入一律不可信：按值/按键脱敏 + 尺寸上限 + 丢弃私有推理
+
+**时间**：2026-09-20
+**里程碑**：M8
+
+### 背景
+
+同进程 SDK 的调用方**就是** AER 正在观测的那个 Agent，所以 AER 信任它的结构化
+负载（D-013：结构化 payload 原样保存）。Adapter 完全不是这种情况。
+
+### 问题
+
+外部负载要治理到什么程度？
+
+### 候选方案
+
+1. 与同进程路径一致：原样保存。
+2. 依赖 Adapter 自己清洗。
+3. AER 侧统一治理：按值脱敏 + 按键脱敏 + 丢弃私有推理 + 尺寸上限。
+
+### 最终方案
+
+方案 3，落在 `aer/adapter/sanitize.py`，**在写入路径上强制执行**。
+
+```text
+按值：Bearer / key=value / URL 内联密码 / PEM / SSH / 厂商 key 前缀
+按键：api_key / authorization / cookie / token / password / credentials ...
+       （短名如 auth/token/secret 精确匹配，避免 author、token_count 误伤）
+丢弃：chain_of_thought / reasoning / scratchpad / hidden_reasoning ...
+       （丢弃而不是脱敏，并记录键名）
+尺寸：单字符串 4096 / decision_summary 2048 / 整体 body 16384 / 深度 8
+截断：一律带显式 marker（第 45 节）
+```
+
+### 理由
+
+- **"信任调用方"这条前提在 Adapter 路径上不成立**：Adapter 是外部进程通过协议送来的
+  数据，端口后面是谁 AER 并不知道。
+- **按键脱敏不能省**：`api_key=abc` 写在字符串里能被形状规则抓到，`{"api_key": "abc"}`
+  不能——`abc` 本身没有任何特征。
+- **私有推理必须"丢弃"而不是"脱敏"**：第 6 节要的不是"别泄漏 token"，而是"这不是
+  AER 该存的东西"。该存的是 `decision_summary`——可审计的行动理由摘要。
+- **静默截断是最坏的结果**：读的人无法分辨"完整记录"和"被剪短的记录"。
+
+### 代价
+
+- 误伤风险：按键匹配刻意保守（`author`、`token_count` 不脱敏），宁可漏掉交给形状规则。
+- 大 payload 会被替换成 marker，内容不进库——这是第 27 节的明确要求（巨大内容以后走
+  Artifact）。
+
+### 验证方式
+
+`tests/adapters/test_sanitization.py`（凭据/键名/URL、私有推理、决策摘要保留、
+三级尺寸上限、深度、注入文本仍是数据）。
+
+### 重新评估触发条件
+
+- 出现合法的、确实需要保存的超大外部负载时——那应该是 Artifact 里程碑的输入，
+  而不是放宽这里的上限。
+
+---
+
+## D-081 能力声明是**强制执行**的，不是文档
+
+**时间**：2026-09-20
+**里程碑**：M8
+
+### 背景
+
+不同平台能提供的信息不同。有的能看到工具调用，有的能看到"用户采纳了这条建议"，
+有的什么都看不到。
+
+### 问题
+
+`AdapterCapabilities` 声明之后，谁来看它？
+
+### 候选方案
+
+1. 只作为文档，靠 Adapter 自觉。
+2. 由 Runtime 强制：没声明就不能写对应的东西。
+
+### 最终方案
+
+方案 2。运行时在写入路径上校验：
+
+```text
+tool_events              → TOOL_CALL / TOOL_RESULT
+human_feedback           → HUMAN_FEEDBACK
+explicit_adoption_signal → 任何非 UNKNOWN 的 usage_signal
+explicit_utility_signal  → utility_label
+external_verification    → 提交证据给 verifier
+```
+
+不满足则 `AdapterCapabilityError`，什么都不写。
+
+### 理由
+
+- **"自觉"在这里等于没有保证**。一个把 `UNKNOWN` 悄悄填成 `ADOPTED` 的 Adapter，
+  产生的行与真实观测**完全无法区分**——而且是更强的那一个断言。
+- 第 12、16、34 节各说了一件事，但都是同一条：**系统不许假装平台提供了它没提供的
+  信息**。把它做成能力门禁，是唯一能规模化的做法。
+- `explicit_utility_signal` 是本轮对第 11 节示例清单的**补充**（清单原文是"例如"）。
+  它单独存在，就是为了让"任务成功了就写 HELPFUL"在结构上不可能发生。
+
+### 代价
+
+Adapter 作者必须认真填一次能力声明；声明填错会立刻报错而不是静默降级。这是想要的。
+
+### 验证方式
+
+`tests/adapters/test_ingest.py::TestCapabilityGates`（四类门禁 +
+`usage_signal` 仍是 `UNKNOWN` 的断言）；`tests/adapters/test_scenarios.py::TestTheCoreScenario`
+（跑完全流程后 `helpful_count == 0`）。
+
+### 重新评估触发条件
+
+- 出现需要**推断**采纳的场景时——那是带置信度的 `inferred adoption`，属于新的来源，
+  不是放宽这条门禁。
+
+---
+
+## D-082 Adapter 崩溃是 Integration Error，不改 Run、不伪造 Verification
+
+**时间**：2026-09-20
+**里程碑**：M8
+
+### 背景
+
+Adapter 是第三方代码。它翻译一个事件时可能抛异常。
+
+### 问题
+
+要不要把这个失败记到 Run 上？
+
+### 候选方案
+
+1. 记成 Run 的 ERROR 事件（像 Distiller 崩溃那样，`system=True`）。
+2. 什么都不记，只抛出 `AdapterError`。
+3. 把 Run 标成 FAILED。
+
+### 最终方案
+
+方案 2。
+
+### 理由
+
+- **方案 1 会把集成 bug 变成 Agent 的失败**：那条 ERROR 与 Agent 自己的错误在 trace
+  上完全同形；更糟的是，Distillation Policy 会因为"这条 Run 出现错误"而认为它值得
+  提炼，于是**集成 bug 变成了经验**。
+- **方案 3 直接篡改事实**：Agent 也许什么都没做错。
+- 崩溃仍要可见：`AdapterError` 会带上原始异常（`__cause__`）、adapter 名与
+  "run 未修改"的说明，并且**在 claim 之前**抛出，所以账本里也不会留下半条记录，
+  平台的重试不会被误判成重复投递。
+
+### 代价
+
+Run 上没有"这次集成崩了"的痕迹。可观测性靠异常与日志（第 55 节），这是刻意的：
+trace 是 Agent 的历史，不是集成方的日志。
+
+### 验证方式
+
+`tests/adapters/test_ingest.py::TestAdapterCrash`：Run 状态、事件、错误、verdict
+全部不变；账本为空；会话之后仍可用。
+
+### 重新评估触发条件
+
+- 出现"必须能在 trace 上看到集成健康度"的运维需求时——那应该是一个独立的
+  integration health 面，而不是往 Run 里塞错误。
+
+---
+
+## D-083 会话映射持久化；terminal 语义必须显式
+
+**时间**：2026-09-20
+**里程碑**：M8
+
+### 背景
+
+外部 Agent 有自己的 session（一个 Codex 对话、一个 Cursor 工作区），AER 有自己的
+Run。Agent 进程重启比任务结束频繁得多。
+
+### 问题
+
+重连时该怎么办？Run 已经结束又重连呢？
+
+### 候选方案
+
+1. 映射只存在内存里，每次连接新建 Run。
+2. 映射入库；重连时若 Run 仍 RUNNING 就复用；已终态则**隐式**新建 Run。
+3. 映射入库；重连复用；已终态时**默认拒绝**，需要显式 `reopen()` 才新建。
+
+### 最终方案
+
+方案 3。
+
+### 理由
+
+- **方案 1 会把一次对话切成多条 trace**：每次 hook 重连都新建 Run，一个任务的
+  events、errors、recoveries 就散在若干条 Run 上，M5 的提炼看到的是碎片。
+- **方案 2 的问题是"隐式"**：重连可能意味着"继续刚才那件事"，也可能意味着"同一个
+  对话里开始第二件事"。只有调用方知道是哪种，系统不该替它决定（第 43 节：
+  "必须定义，不要隐式创建"）。
+- 开门见山的做法：`open()` 遇到已终态**抛 `AdapterSessionTerminated`**；
+  调用方要么换一个 session，要么显式 `reopen()`。`reopen()` 会把旧 run id 记进
+  `previous_runs`——旧 trace 保留，且"一个外部会话产生了两条 AER Run"这件事是
+  **写下来的事实**，不是推断。
+
+### 代价
+
+调用方多写一个方法名。换来的是"每个 Run 边界都是有意为之"。
+
+### 验证方式
+
+`tests/adapters/test_sessions.py`（STARTED / RESUMED / 拒绝 / REOPENED +
+`previous_runs` + 跨进程重启恢复）。
+
+### 重新评估触发条件
+
+- 出现"一个外部会话天然对应多个并发 Run"的平台时（那时映射需要变成一对多，
+  而不是放开终态检查）。
+
+---
+
+## D-084 协议版本独立命名；不兼容直接失败
+
+**时间**：2026-09-20
+**里程碑**：M8
+
+### 背景
+
+包有版本号（`0.8.0`），协议也有语义版本。
+
+### 问题
+
+能不能用包版本表示协议版本？
+
+### 候选方案
+
+1. 用包版本（`AER_ADAPTER_PROTOCOL_VERSION = aer.__version__`）。
+2. 独立常量 `"1"`，注册/使用时校验，不匹配直接抛错。
+
+### 最终方案
+
+方案 2。
+
+### 理由
+
+- **两者的变化频率差一个数量级**：发一次版不该让所有 Adapter 失效，改一次协议
+  语义必须让不兼容的 Adapter 立刻停下来。用一个数字表示两件事，等于每次发版都在
+  协议上撒谎。
+- **"兼容"不能靠 best-effort**：协议不兼容不会优雅降级，它会产生字段含义微妙不同的
+  envelope，而那些 envelope 会变成证据（第 36 节）。
+- 校验点有两个，都要有：注册表 `create()` 时（配置错误在启动时暴露），以及
+  Adapter 实例被直接传进来时（不能只防一条路径）。envelope 上的
+  `protocol_version` 也会被逐条校验。
+
+### 代价
+
+Adapter 作者要和常量比较一次。换来的是版本错配在启动时失败，而不是在数据里。
+
+### 验证方式
+
+`tests/adapters/test_protocol.py::TestProtocolVersionCompatibility`（注册表路径 +
+直接实例路径 + envelope 路径）。
+
+### 重新评估触发条件
+
+- 无。这是版本化协议的常规做法。
+
+---
+
 ## 模板（后续决策请复制此结构）
 
 ```text
@@ -2851,3 +3892,663 @@ ImportError"——一个只在生产才出现的失败。所以必须同时改�
 ### 理由
 ### 重新评估触发条件
 ```
+
+
+---
+
+## D-085 用 lifecycle hooks，不用 `notify`
+
+**时间**：2026-09-20
+**里程碑**：M8.1
+
+### 背景
+
+Codex 提供两种观测面：`notify`（配置项，turn 结束时回调一个可执行文件）与
+lifecycle hooks（`~/.codex/hooks.json`，12 个事件）。
+
+### 最终方案
+
+用 hooks；`notify` 只作为 turn 结束的兜底。
+
+### 理由
+
+- **信息量差距是数量级的**。`notify` 只在 turn 结束时触发一次，只能告诉我们"有一轮结束了"；
+  hooks 给出 `SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` /
+  `SessionEnd`，这才是 trace 的骨架（第 41–42 节）。
+- **`notify` 无法给出工具调用级别的证据**。没有它，AER 拿到的是一串"完成"，而不是
+  "做了什么、哪一步失败、后来怎么修好的"——而后者正是 M5 要提炼的东西。
+- 本机真实配置里两者都存在（`config.toml` 的 `notify` 指向 computer-use 运行时，
+  `hooks.json` 指向 memmy 的记忆钩子），这直接证明了它们是**两个独立机制**，不是同一件事的
+  两种写法。
+
+---
+
+## D-086 `notify` 只作为 fallback，且不得宣传为 full trace
+
+**时间**：2026-09-20
+**里程碑**：M8.1
+
+### 最终方案
+
+本轮**不实现** `notify` 接入，只在文档里保留它的定位。
+
+### 理由
+
+- 若把 `notify` 当数据源，会得到一个"每次 turn 一条事件"的假 trace：它看起来很完整
+  （每一轮都有记录），实际上没有任何工具、错误或恢复信息。这比没有数据更危险，
+  因为它会让 coverage 报告说谎。
+- 真正用得上它的场景只有一个：某台机器上 hooks 完全不可用，此时"至少知道有 turn 发生"
+  比什么都没有好。那时它是一个**明确标注为降级**的数据源。
+
+---
+
+## D-087 `Stop` 与 `SessionEnd` 不能都终止 Run：唯一 terminal authority
+
+**时间**：2026-09-20
+**里程碑**：M8.1
+
+### 背景
+
+两个事件名字上都像"结束"。
+
+### 最终方案
+
+**只有 `SessionEnd` 终止 Run。** `Stop` 不映射为终态。
+
+### 理由
+
+- **两个都终止会产生双终态**，而 Runtime 的 `finish` 只接受一次；第二次会抛
+  `RunStateError`，于是 Hook 失败、用户看到噪音（第 11 节）。
+- **实测证据**：在 probe 里，一轮**没有成功完成**的会话中 `Stop` **没有触发**，
+  而 `SessionEnd` 触发了。这与"`Stop` 是 turn 级、`SessionEnd` 是 session 级"一致。
+  Turn 级信号不能终止一个可能包含多轮的 session Run。
+- 诚实的限制：**`Stop` 的成功路径没有被观测到**（需要一次真实模型回合）。因此本轮
+  不基于它做任何终态判断，coverage 报告里它标为 MISSING。
+
+---
+
+## D-088 Codex 自述成功不是 Verification
+
+**时间**：2026-09-20
+**里程碑**：M8.1
+
+### 最终方案
+
+Adapter **没有** `external_verification` 能力；任何 Codex 文本（包括
+"Done. All tests pass."）都不会产生 `VerificationRecord`。
+
+### 理由
+
+- 第 22–23 节：Codex 说测试通过，是 **agent statement**；只有 hook 或工具结果提供的
+  **确定性事实**（例如 `pytest` 的 `exit_code = 0`）才可能作为 verification evidence，
+  并且仍须经 VerificationEngine 写入。
+- 让 Adapter 有机会写 verdict，等于把"被评估方"放进裁判席。
+- 测试以**否证**方式断言：跑完整会话后 `get_verifications() == []`。
+
+---
+
+## D-089 工具成功 ≠ Experience 被采用
+
+**时间**：2026-09-20
+**里程碑**：M8.1
+
+### 最终方案
+
+Codex Adapter **不声明** `explicit_adoption_signal`，因此
+`AdapterIngestor.record_usage_signal(... ADOPTED ...)` 会被拒绝，落库的永远是 `UNKNOWN`。
+
+### 理由
+
+- 第 5、27 节：Codex 用了一个工具（尤其是 `shell`），与它是否采用了一条 AER Experience
+  没有任何必然联系。没有任何 Codex hook 观测到后者。
+- 能力门禁是 M8 的机制，这里只是**如实填写**声明表：声明写 true 就等于允许一条猜测
+  变成训练数据。
+- 同样的理由适用于 `explicit_utility_signal`（第 16、34 节）：任务成功不写 HELPFUL。
+
+---
+
+## D-090 Hook coverage 必须 probe，且必须分模式
+
+**时间**：2026-09-20
+**里程碑**：M8.1
+
+### 最终方案
+
+`scripts/probe_codex_hooks.py` 是唯一权威；`coverage.py` 里的矩阵按
+`exec` / `interactive` 分别记录，MISSING 就是 MISSING。
+
+### 理由
+
+- **`exec` 与 `interactive` 的 hook 分发互相独立**（第 36 节）。历史上存在
+  `codex exec` 不分发 repo hooks 的问题，因此"interactive 能跑"不能推出"exec 能跑"。
+- **文档会过期，二进制不会**。本轮所有结论来自实际安装的 `0.155.1`（二进制里的
+  serde 字段名 + 真实投递的 payload），而不是来自本文档的假设。
+- **缺口必须可见**：一个没有工具事件的 Run，看起来和"这次没用工具"完全一样。
+  coverage 报告就是用来区分这两种情况的（第 37–38 节）。
+
+### 代价
+
+coverage 矩阵目前有 9 个 MISSING（exec）与 12 个 MISSING（interactive）。
+这是事实，不是失败；把它写成事实才是本节的目的。
+
+---
+
+## D-091 `SessionStart` 不建 Run；Run 由第一个带 task 的 payload 建立
+
+**时间**：2026-09-20
+**里程碑**：M8.1
+
+### 背景
+
+第 9 节建议：`SessionStart` 建立 `adapter_sessions` → AER Run，重复 Hook 必须 resume。
+
+### 问题
+
+`SessionStart` 的 payload 里**没有 task 字段**（这是实测的，见 fixture）。
+
+### 最终方案
+
+- `SessionStart` 到达时：解析会话；若已知则记为 resume，**不创建 Run**；
+- `UserPromptSubmit` 到达时：用 prompt 的脱敏摘要作为 task，`open()` 建 Run；
+- 同一 session 的后续 hook 一律 resume 到同一个 Run（第 9 节的可观测结果仍然成立）。
+
+### 理由
+
+- Run 的 `task_description` 是 AER 事后提炼经验的**唯一任务上下文**。用占位符建 Run，
+  等于让这条 Run 永久失去它描述的对象；等一个 payload 再建，只损失几毫秒。
+- 只发生 `SessionStart` 而从未出现 prompt 的会话**不产生 Run**，这是正确的：没有 task，
+  就没有可追踪的工作。
+- 代价（必须写明）：一个 session 若先后有多个 prompt，它们属于**同一个 Run**，
+  第二轮 prompt 不会新建 Run，也不会单独成为一条事件。这是刻意的粒度选择
+  （与第 19 节的"子 Agent 共用主 Run"一致），但它是本轮的**已知限制**。
+
+---
+
+## D-092 只映射被观测到的两个事件；其余十一个显式忽略
+
+**时间**：2026-09-20
+**里程碑**：M8.1
+
+### 最终方案
+
+`ENVELOPE_FOR` 只有两项：`PreToolUse → TOOL_CALL`、`PostToolUse → TOOL_RESULT`。
+其余十个事件投递后返回空 envelope，被记为 `IGNORED`，并在 coverage 里标为 MISSING。
+
+### 理由
+
+- **没有被观测到的 payload 形状，就没有可写的映射**。`PermissionRequest`、
+  `PreCompact`、`SubagentStart/Stop`、`Interrupt` 等字段名虽然在二进制里存在，
+  但本轮拿不到真实 payload；照着字段名猜一个映射，会产出**看起来被测过、其实从未见过
+  真实事件**的代码（第 13–19、45 节）。
+- **不新增 EventType**（第 16 节）。AER 的事件词汇是稳定的；一个厂商事件没有自然语义时，
+  正确做法是记录限制，而不是扩词汇表。
+- `Interrupt` 与 `Stop` 都涉及终态语义，而终态语义**必须 probe 之后**才敢实现（第 12 节），
+  本轮明确不实现。
+
+---
+
+## D-093 `SessionEnd` 未声明结果时，Run 关闭为 ABORTED
+
+**时间**：2026-09-20
+**里程碑**：M8.1
+
+### 背景
+
+实测 `SessionEnd` 的 payload 只有一个 `reason` 字段，观测到的值是 `"other"`。
+
+### 问题
+
+`reason` 不表示结果时，Run 该以什么状态结束？
+
+### 候选方案
+
+1. 留 `RUNNING` —— 等别的信号。
+2. 记 `SUCCESS` —— "会话正常结束了"。
+3. 记 `ABORTED`，并记录"Codex 没有声明结果"。
+
+### 最终方案
+
+方案 3。
+
+### 理由
+
+- **方案 1 是最确定错误的**：Codex 已经拆掉了会话，Run 永远不会再有信号，它会永远
+  停在 RUNNING，污染所有"进行中"的统计，并且永远无法被提炼或验证。
+- **方案 2 是制造声明**。`RunStatus` 记录的是**Agent 声明了什么**，而 Codex 什么都没声明。
+  第 10 节明确禁止把"会话结束"等同于"任务成功"。
+- `ABORTED` 的语义是"Agent 未声明完成即结束"——这正是未声明结束的准确描述。它是对
+  **声明**的陈述，不是对**工作**的断言。
+
+### 代价（必须写明）
+
+若 Codex 在正常结束时也发 `reason="other"`，那么**所有** Codex Run 都会是 `ABORTED`，
+而 `verified_success` 要求 Run 先被声明为 SUCCESS，于是这些 Run 无法成为 verified success。
+这是本轮最重要的一条已知限制，也是 M8.x 最值得优先补齐的一环：需要一次真实会话去
+观测"正常结束"的 `reason` 值。`finish_status()` 已经支持 `complete/completed/success/done`
+等拼写，一旦观测到，只需补一行。
+
+---
+
+## D-094 Crash gap 的显式恢复路径：可检测 + 不重放
+
+**时间**：2026-09-20
+**里程碑**：M8.1
+
+### 背景
+
+M8 的账本是"先 claim，后 apply"（D-079）。进程若在两者之间被杀，该外部事件不会被应用，
+重试会被判为重复。
+
+### 最终方案
+
+- **可检测**：`adapter_status()["unapplied_events"]` 与
+  `adapter_events.list(applied=False)` 是明确的查询路径；测试模拟该状态并断言可见。
+- **不重放**：不提供 `reconcile/replay`。
+
+### 理由
+
+- **重放需要内容，而账本只存身份**。M8 的 `adapter_events` 记录 external id、类型、
+  来源与时间，不保存归一化后的 envelope。要支持重放必须先补 schema 存内容——那意味着
+  把外部 payload 副本长期留在库里，正是第 41 节警告的东西。
+- **因此本轮不声称 exactly-once，也不声称 replay**，只声称：
+  重复投递安全（账本）、崩溃可检测（`applied=false`）、部分应用不会发生（一次事件的所有
+  envelope 在一次调用里应用完）。这符合第 32–33 节给出的"effectively-once"边界。
+- 需要重放的场景（例如某类事件必须零丢失）应该先在**适配器侧**做本地 spool，而不是让
+  AER 保存外部内容。
+
+---
+
+## D-095 Run 粒度：AER Run = Codex Session（本轮维持），并记录其后果
+
+**时间**：2026-09-20
+**里程碑**：M8.1
+
+### 背景
+
+第 14 节要求记录真实事件关系后明确决定粒度：
+
+```text
+SessionStart → UserPromptSubmit → Stop → 第二次 UserPromptSubmit → Stop → SessionEnd
+```
+
+### 已观测到的事实
+
+```text
+SessionStart / UserPromptSubmit / SessionEnd  已捕获
+Stop                                          在未完成的一轮中没有触发（MISSING）
+第二次 prompt 后的 Stop                       未观测（需要真实模型回合）
+```
+
+### 最终方案
+
+**AER Run = Codex Session**（一个 session 一条 Run）。本轮维持。
+
+### 理由
+
+- **`SessionStart` 有稳定的 `session_id`，而 prompt 没有独立的会话标识**。以 session 为
+  Run 边界，`adapter_sessions` 的 `(provider, external_session_id)` 唯一约束正好直接可用；
+  以 turn 为边界则需要为每个 turn 造一个新的外部标识，而 Codex 并没有提供。
+- **`SessionEnd` 是唯一的终态信号，且它是 session 级的**（D-087）。如果 Run 以 turn 为粒度，
+  一条 Run 就永远等不到自己的 `SessionEnd`，终态必须由别的东西决定——那正是 D-087 拒绝的
+  "多个终态权威"。
+- **`Stop` 的语义尚未被证实**（需要真实回合）。在一个语义未定的信号上建立 Run 边界，
+  等于把整条数据模型押在一个未验证的假设上。
+
+### 后果（必须写明）
+
+```text
+一个 Codex session 里若有多个不相关的 prompt，它们会落进同一条 AER Run：
+  - task_description 只记第一个 prompt 的摘要
+  - 第二个 prompt 不产生新 Run，也不单独成为事件
+  - 因此这条 Run 的任务边界是模糊的：multi-task session may mix task boundaries
+```
+
+对下游的影响：
+
+```text
+Distillation 看到的是一条混合轨迹，提炼出的"问题"可能对应 session 里的第一件事，
+而"失败/修复"却来自第二件事。这是真实的语义损失，不是实现细节。
+```
+
+### 重新评估触发条件
+
+- `Stop` 的真实 payload 被捕获之后（它是否携带 per-turn 标识，直接决定 turn 粒度是否可行）；
+- 或者出现"一个 session 必须拆成多条 Run"的真实需求（那时应该引入 Codex 侧的 turn 标识，
+  而不是在 AER 侧猜）。
+
+---
+
+## D-096 Crash gap：`adapter_events` 仍不保存归一化 envelope
+
+**时间**：2026-09-20
+**里程碑**：M8.1
+
+### 背景
+
+第 17 节要求：在取得真实 Tool Hook 之后，重新评估 `adapter_events` 是否应保存
+**sanitized normalized envelope**，以支撑未来的 `reconcile_unapplied_events()`。
+
+### 本轮事实
+
+```text
+Tool Hook 未捕获（provider 不可达）→ §17 的前置条件本轮不成立
+crash gap 现状：可检测（applied=false），不重放（D-094）
+```
+
+### 最终方案
+
+**本轮不补 schema，不定将来必须补。** 记录判断依据，等真实 Tool Hook 到位后再定。
+
+### 理由
+
+- **第 17 节把这件事的前置条件写得很清楚**："本轮不要先建设完整 replay，但在取得真实
+  Tool Hook 后重新评估"。前置条件未达成时下结论，就是在猜。
+- **要保存什么，取决于真实 payload 里有什么**。如果真实 `PostToolUse` 携带足够信息
+  （`tool_use_id` + 结构化 outcome），那么重放所需的"归一化 envelope"可以仅由
+  **已持久化的字段 + 外部关联 id** 重建，无需保存额外内容；反之则必须存内容。
+  这个判断在拿到真实 payload 之前无法做出。
+- **倾向明确**：即使将来要支持重放，也**不保存 raw Codex payload**（第 17 节明确禁止）。
+  可选方案是保存**归一化后并已脱敏的 envelope**——它比 raw 小得多，且不含 prompt 原文。
+  但这条路径只有在确认真实 payload 无法重建时才启用。
+
+### 重新评估触发条件
+
+- 真实 `PreToolUse` / `PostToolUse` payload 被捕获；
+- 或者出现"某类事件零丢失"的真实运维要求。
+
+---
+
+## D-097 `PostToolUse` 只给字符串输出：工具失败不写 ERROR
+
+**时间**：2026-09-20
+**里程碑**：M8.1（真实工具级捕获）
+
+### 捕获到的事实
+
+一次真实会话（gpt-5.6-luna，4 次工具调用：Bash 失败、Bash 查看文件、apply_patch 修改、
+Bash 复跑成功）的 `PostToolUse` payload，**字段集合完全一致**：
+
+```text
+session_id, turn_id, transcript_path, cwd, hook_event_name, model,
+permission_mode, tool_name, tool_input, tool_response, tool_use_id
+```
+
+关键点：**`tool_response` 永远是字符串**。
+
+```text
+Bash 失败   : "Traceback (most recent call last): ... AssertionError: expected 2, got 1"
+Bash 成功   : "check passed"
+apply_patch : "Exit code: 0 Wall time: 0 seconds Output: Success. Updated ..."
+```
+
+没有 `exit_code`、没有 `success`、没有 `error`——payload 里**任何位置都没有**。
+
+### 最终方案
+
+```text
+tool_response 是字符串 → success = None（三态里的"未声明"），不写 ERROR 事件
+结构化 response（带显式 error/success）→ 保留窄容差分支，标注为未观测
+删除所有顶层 exit_code / error / status 检查（真实 payload 里不存在这些键）
+```
+
+### 理由
+
+- **唯一的失败信号是输出里的文字**（`Traceback`）。从文本推断失败正是第 52 节禁止的事，
+  而且不可靠：一次失败运行的输出里同样可能出现 `passed` 字样。
+- **删除死代码比保留它更诚实**。旧版检查的顶层键在真实 payload 里根本不存在，
+  那些分支让 Adapter 看起来比 hook 表面更有能力。
+- `apply_patch` 的输出里确实有 `Exit code: 0` 这样**结构化的文本行**。本轮**故意不解析**：
+  它是一个工具的文本约定，不是 Codex 的协议契约；一旦开始解析文本，边界就没了。
+  这条观察记录在 fixture manifest 里，供将来评估。
+
+### 代价（必须写明）
+
+第 9 节要求验证 `TOOL_CALL → ERROR → TOOL_RESULT(success=false)`。**这个链在 Codex 0.155.1
+上无法产生**，因为 hook 不提供结果。真实的记录是：
+
+```text
+TOOL_CALL → TOOL_RESULT（无 success 字段，result 里是失败文本）
+```
+
+这是 Codex hook 表面的限制，不是 AER 的缺陷；把文本猜成失败反而会制造假证据。
+
+### 重新评估触发条件
+
+- Codex 让 `tool_response` 变成带显式结果的结构体时（那时容差分支就会真正生效）。
+
+---
+
+## D-098 `Stop` 是 turn 级、不带结果：仍然不终止 Run
+
+**时间**：2026-09-20
+**里程碑**：M8.1（真实工具级捕获）
+
+### 捕获到的事实
+
+```json
+{
+  "session_id": "...", "turn_id": "...", "transcript_path": "..", "cwd": "..",
+  "hook_event_name": "Stop", "model": "..", "permission_mode": "..",
+  "stop_hook_active": false,
+  "last_assistant_message": "The branch name is `master`."
+}
+```
+
+回答第 11 节的四个问题：
+
+```text
+Stop 是 turn terminal 还是 session terminal？ →  turn 级：带 turn_id，且 SessionEnd 在其后
+是否总在 SessionEnd 前？                       →  观测到的是（Stop → SessionEnd）
+是否每个 prompt 都触发？                       →  单 prompt 会话观测到 1 次；多轮未验证
+是否携带结果？                                 →  ❌ 不带。只有 last_assistant_message 文本
+```
+
+### 最终方案
+
+**`Stop` 仍然不终止 AER Run。** `SessionEnd` 保持唯一终态权威。
+
+### 理由
+
+- `Stop` 带 `turn_id`，是**turn 结束**；一条 Run 可能包含多个 turn（D-095 的粒度选择）。
+  用 turn 级信号结束一条 session 级 Run，会让第二个 turn 写进一条已完成的 Run。
+- `Stop` 不携带任何结果字段；`last_assistant_message` 是**自然语言自述**，
+  把它当作结果就是 D-088 禁止的那件事。
+- 反过来也有价值：`Stop` 现在可以作为一个**可靠的"这一轮结束了"信号**记录进 metadata，
+  将来若需要 turn 粒度（D-095 的重新评估条件），它就是入口。
+
+### 重新评估触发条件
+
+- 需要 turn 粒度时；或 Codex 给 `Stop` 加上结构化结果字段时。
+
+---
+
+## D-099 `SessionEnd.reason = "other"` 是正常值（P0 已确认）
+
+**时间**：2026-09-20
+**里程碑**：M8.1（真实工具级捕获）
+
+### 捕获到的事实
+
+一次**正常完成**的会话——turn 正常结束、工具调用成功、助手给出正常回复——
+其 `SessionEnd` 仍然是：
+
+```json
+{"session_id": "..", "transcript_path": "..", "cwd": "..", "hook_event_name": "SessionEnd", "reason": "other"}
+```
+
+### 结论（第 12 节的 P0）
+
+**`"other"` 是正常值，不是失败指示。** Codex 0.155.1 在任何观测到的会话里都没有声明过结果。
+
+### 影响
+
+D-093 的担忧**被真实数据证实**：
+
+```text
+所有 Codex Run 都会以 ABORTED 结束（因为没人声明结果）
+而 verified_success 要求 Run 先被声明为 SUCCESS
+⇒ Codex Run 在当前映射下无法成为 verified success
+```
+
+同时，D-093 的 `outcome_declared = false` 与第 13 节的保护**因此是必需的**，
+不是防御性设计：没有它，每一次 Codex 会话都会产出一条假的 FAILURE experience。
+
+### 最终方案
+
+```text
+保持 ABORTED + outcome_declared=false（不伪造 SUCCESS）
+保护逻辑保持：无声明 → DistillationPolicy 不产生 FAILURE experience
+把"Codex 无法产生 verified success"记为已知限制，而不是悄悄绕过
+```
+
+### 为什么不去"修好"它
+
+可选方案及否决理由：
+
+```text
+把 "other" 映射成 SUCCESS      → 制造声明。第 10 节明确禁止。
+留 RUNNING                     → 会话已拆掉，Run 永远等不到信号，污染统计。
+引入新 RunStatus               → 改协议（第 1 节禁止），且状态词汇表是 AER 的。
+用 Stop 的 last_assistant_message 判断 → 文本自述，D-088 禁止。
+```
+
+### 重新评估触发条件
+
+- Codex 引入带结果的 session 结束事件时；
+- 或经 AER 自身的验证路径拿到 confirmed outcome（那时 verified_success 仍然受 RunStatus 限制，
+  需要重新讨论 M4 的 `verified_success` 定义是否应绑定 RunStatus）。
+
+---
+
+## D-100 `INCONCLUSIVE`：把"没人声明结果"变成一个状态，让独立验证替代声明
+
+**时间**：2026-09-20
+**里程碑**：M8.1.1
+
+### 背景
+
+M8.1 捕获了真实 Codex 会话，结论写进 D-099：`SessionEnd.reason` 永远是 `"other"`，
+**包括正常完成的会话**。上一轮（D-093）用这样一套组合处理它：
+
+```text
+Run.status = ABORTED
+Run.metadata["outcome_declared"] = false
+```
+
+三个问题随真实数据一起浮出来：
+
+```text
+1. ABORTED 在 AER 里的含义是"agent 声明放弃"，于是每条 Codex Run 都进入了失败词汇表，
+   需要靠一个 metadata 约定把它拉回来；
+2. 同一件事有两个表示（状态 vs metadata），一旦有一处忘记写或忘记读，行为就悄悄变了；
+3. verified_success 要求 status is SUCCESS，所以 Codex Run **在结构上不可能**成为
+   verified success —— 即使一个独立的 pytest exit code 已经证明任务确实完成了。
+```
+
+### 核心判断
+
+这不是 Codex 的限制，是 **AER 词汇表的缺口**。
+
+M8 的设计目标是"adapter 只负责告诉 AER 平台声明了什么"。而平台能给的答案有四种：
+
+```text
+provider declared SUCCESS
+provider declared FAILURE
+provider declared ABORTED
+provider outcome UNKNOWN        ← 这一种在 RunStatus 里没有位置
+```
+
+第四种没有位置，就只能借用前三种之一。借 SUCCESS 是制造声明，借 ABORTED 是把沉默说成放弃
+—— 两种都是撒谎。
+
+### 候选方案
+
+```text
+1. 维持现状：ABORTED + metadata.outcome_declared=false
+2. adapter 在平台没声明时映射成 SUCCESS
+3. 恢复 RUNNING，等别的信号
+4. 新增一个终态 INCONCLUSIVE
+```
+
+### 最终方案
+
+方案 4，落成四处改动：
+
+```text
+RunStatus.INCONCLUSIVE            新增终态；唯一的"不声明任何事"的状态
+Codex SessionEnd(未声明)          → INCONCLUSIVE（不再借 ABORTED）
+is_verified_success               SUCCESS 或 INCONCLUSIVE + 有 required + 无 required 失败
+Distillation                      INCONCLUSIVE + 已验证 → SUCCESS/RECOVERY
+                                  INCONCLUSIVE + 未验证 → 没有 kind，veto
+metadata.outcome_declared         删除（状态即事实，不再保留第二份表示）
+```
+
+### 理由（逐条）
+
+**为什么方案 2 最坏**：它制造一个没人做过的声明。第 10 节明令禁止，M8.1 花了整轮去避免的
+"Codex 说测试通过就当作成功"，正是这件事的另一种写法。
+
+**为什么方案 3 同样错**：Codex 已经把会话拆掉了，不会再有后续信号。Run 会永远停在 RUNNING，
+污染所有"进行中"的统计，并且永远无法被提炼或验证 —— 这是唯一确定错误的答案。
+
+**为什么方案 1 不只是"不够优雅"**：它让**独立验证无法生效**。M4 的核心断言是
+"证据 > 声明"（section 26/28）；而这里词汇表挡住了它：一个被确定性验证证明完成的任务，
+因为没人"声明"成功，就永远不能成为 verified success。这是本轮真正的驱动问题。
+
+**为什么 INCONCLUSIVE 可以经 required PASS 变成 verified success**：
+`is_verified_success` 的存在目的是防止 **agent 自己的声明** 被当成证据。
+INCONCLUSIVE 里**没有任何声明**，所以 required verification 不是在和声明竞争，
+而是在**替代**一个从未存在的声明。反过来要求"先有声明"，等于要求
+"能自报结果的平台才有资格被独立验证" —— 那把验证的价值绑在了它最不可信的那个信号上。
+
+**为什么 FAILED / ABORTED / PARTIAL_SUCCESS 仍然永远不是 verified success**：
+它们是"工作**未完成**"的声明。通过的检查说明环境正常，不说明 agent 完成了任务
+（M4 section 28 原文语义不变）。
+
+### 旧语义（明确不变）
+
+```text
+SUCCESS             仍 = 声明 + 通过全部 required 检查
+FAILED / PARTIAL_SUCCESS / ABORTED   仍然永远不是 verified success
+classify_kind 的优先级不变：required 失败 > 状态声明 > recovery > success
+DistillationTrigger.FAILED_RUN 仍只由 FAILED / ABORTED / PARTIAL_SUCCESS 触发
+RunOutcome.RUN_FAILED 仍只统计那三种；INCONCLUSIVE 归入 UNVERIFIED
+ABORTED 反而**恢复**了原意：只表示 agent 声明放弃，不再兼职"没人声明结果"
+```
+
+### 代价（必须写明）
+
+```text
+一个 INCONCLUSIVE 且没有任何 required verification 的 Run 现在完全不可提炼，
+即使它记录了 ERROR。
+
+理由：ExperienceKind 的三个成员都是对**任务**的断言，而一个 ERROR 只断言"某一步失败"。
+没有 kind 可写时就不写 —— 宁可没有经验，也不要一条把"某一步失败"说成"任务失败"的经验。
+被否决的替代方案是"就先写成 FAILURE 吧"，那正是本轮要消除的东西。
+
+后果：Codex 在接上验证路径之前仍然产不出经验。与 M8.1 的结论一致，
+区别是现在**有路可走**，而不是结构上封死。
+```
+
+### 与下一个 Adapter 的关系（本轮的真正目的）
+
+第二个平台只需要回答四个词：
+
+```text
+declared SUCCESS / declared FAILURE / declared ABORTED / outcome UNKNOWN
+```
+
+"UNKNOWN + verifier PASS 算不算可信成功"由 **AER 决定一次**，
+而不是每个 adapter 各写一份判断。这是 M8 最初的设计目标，本轮把它补齐了。
+
+### 数据影响
+
+`metadata["outcome_declared"]` 被删除。该约定在上一轮引入，随 M8.1 一起，
+**从未发布**（`docs/DEPLOYMENT.md` 记录生产 `adapter_sessions` / `adapter_events` 为空），
+因此没有需要迁移的数据。`metadata["codex"]["outcome_stated"]` 保留：它是 Codex 侧的细节，
+说明 payload 里到底有没有 `reason` 值，与 Run 的语义无关。
+
+### 重新评估触发条件
+
+- 若出现"一个既没有声明也没有验证的 Run 确实值得保留"的真实需求，
+  应该讨论 `ExperienceKind` 是否需要第四个成员，**而不是**放宽这里。

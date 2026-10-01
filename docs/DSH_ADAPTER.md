@@ -251,5 +251,6 @@ profile.
   exercised against a live MCP server.
 * The bridge is a subprocess over stdin/stdout. A socket transport is a possible later
   milestone; the protocol is explicit enough to survive it.
-* `experience_usage.experience_id` has no `ON DELETE` behaviour to review here: the
-  `experience_usage` table does not exist in this schema revision.
+* Usage is persisted in the M7 `experience_usage` table (revision 0005).
+  Experience deletion semantics must be checked against that revision before adding
+  destructive retention tools.

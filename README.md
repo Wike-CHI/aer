@@ -28,6 +28,13 @@ Task → Agent Execution → Hook Capture → Trajectory → Verification
 
 ---
 
+## 完整闭环验收
+
+最新 M7/M8 开发代码的安装与验收见 [可用版本说明](docs/USABLE_VERSION.md)。
+源码安装检索依赖后，还需执行 `python scripts/install_neug_extensions.py` 安装 FTS 扩展。
+运行 `python -m aer.demo --output-dir ./demo-results` 可验证本地失败、恢复、提炼、
+真实检索、上下文消费、使用追踪与重启持久化；示例不需要模型凭据或真实 WP 站点。
+
 ## 安装
 
 要求 **Python >= 3.12**。

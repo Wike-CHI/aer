@@ -95,9 +95,20 @@ class Verifier(Protocol):
     conformance before running anything, and validates the *return value* after.
     """
 
-    name: str
-    verifier_type: VerifierType
-    required: bool
+    @property
+    def name(self) -> str:
+        """Identity read by the engine; implementations need not expose a setter."""
+        ...
+
+    @property
+    def verifier_type(self) -> VerifierType:
+        """Trust category read by the engine."""
+        ...
+
+    @property
+    def required(self) -> bool:
+        """Whether this check contributes to the required outcome."""
+        ...
 
     def verify(self, context: VerificationContext) -> VerificationResult:
         """Return this verifier's verdict for ``context``."""

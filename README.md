@@ -971,3 +971,40 @@ turn  一个会话会活过很多任务：UserPromptSubmit 在旧 Run 仍开着�
       先把旧 Run 关为 INCONCLUSIVE 再开新 Run。Run 的粒度是 turn，不是 session。
 ```
 
+---
+
+## A/B 实验（TASKS #17-#19）：P(success | experience) > P(success)？
+
+MVP 假设的检验机制。三个设计点：
+
+```text
+分配  arm_for(seed, unit) 是纯函数——同一任务永远进同一臂，跨进程可复现、
+      事后可审计。存疑的分配是可争辩的，随机的分配不是。
+盲执行 executor 代码在两个臂完全相同，只根据 retrieve() 是否返回经验分支——
+      这正是实验要测量的因果差。对照臂的 retrieve() 返回 None 且不留记录，
+      holdout 干净与否由 API 形状保证，不靠执行器自觉。
+计量   指标（#18 全部九项）从打了戳的 store 重算，不边跑边收集——
+      storage 是事实，每种读法都是投影。
+```
+
+```python
+from aer import AER, Experiment, compute_report
+
+with AER("./data", distillation_provider=my_provider) as aer:
+    experiment = Experiment(aer, name="wp-403", seed=42)
+    for task_id in task_queue:
+        task = experiment.begin_task(f"fix {task_id}", unit=task_id, task_type="wp")
+        guidance = task.retrieve("how do I avoid the 403")   # 对照臂: None
+        run_agent(task.run, guidance)                        # 两个臂同一函数
+    report = compute_report(aer, name="wp-403")
+    report.success_lift                                    # treatment - control
+```
+
+```bash
+python scripts/run_experiment_pilot.py --tasks 20 --seed 7   # 全机器可跑的试点
+```
+
+**试点不是假设检验**：pilot 的 executor 是脚本化的，产出的差异是手工 built-in
+的，它的职责是验证机械装置（分配、盲执行、指标计算）端到端可用。#17 把真正的
+检验保留给真实 WordPress Agent、每臂至少 50 个任务——那之前，`success_lift`
+再高也只说明"机器能报出差异"，不说明"经验有用"。pilot 的输出里带着同样的警告。

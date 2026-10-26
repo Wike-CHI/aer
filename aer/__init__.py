@@ -150,6 +150,7 @@ from aer.experience.evidence import RunEvidence, RunEvidenceBuilder
 from aer.experience.policy import DEFAULT_POLICY, DistillationDecision, DistillationPolicy
 from aer.experience.provider import CallableDistillationProvider, DistillationProvider
 from aer.experience.service import ExperienceService
+from aer.experiment import ArmMetrics, Experiment, ExperimentReport, ExperimentTask, compute_report
 from aer.knowledge.formatter import FORMATTER_VERSION, ExperienceContextFormatter
 from aer.knowledge.models import (
     DEFAULT_RETRIEVAL_LIMIT,
@@ -298,6 +299,7 @@ __all__ = [
     "AgentExecutionEnvelope",
     "AgentIdentity",
     "AgentObservation",
+    "ArmMetrics",
     "CallableDistillationProvider",
     "CallableEnvironmentVerifier",
     "CallableVerifier",
@@ -333,6 +335,9 @@ __all__ = [
     "ExperienceStatus",
     "ExperienceUsage",
     "ExperienceUsageService",
+    "Experiment",
+    "ExperimentReport",
+    "ExperimentTask",
     "ExternalEventRecorder",
     "GenericAgentAdapter",
     "H1CountVerifier",
@@ -397,6 +402,7 @@ __all__ = [
     "can_transition",
     "classify_kind",
     "classify_outcome",
+    "compute_report",
     "context_fingerprint",
     "dedup_key_for",
     "is_at_least",

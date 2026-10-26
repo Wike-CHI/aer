@@ -1560,7 +1560,16 @@ Task End
 
 ---
 
-# 17. Real-world Experiment
+# 17. Real-world Experiment（机械装置已完成，真实检验按原计划保留）
+
+> 完成记录（2026-10-26）：检验假设所需的**机械装置**落地——
+> `aer/experiment/`：`Experiment`（seed 决定的确定性分配 + 打戳的 begin_task +
+> 臂感知 retrieve：对照臂返回 None 且不留记录）、`compute_report`（#18 全部
+> 九项指标从打戳的 store 重算，空分母为 None 而非 0.0）、
+> `scripts/run_experiment_pilot.py`（脚本化 executor 的试点，验证装置端到端；
+> **不是假设检验**，输出自带此警告）。
+> 按本节原计划，真实检验（真实 WP Agent、每臂 ≥50 任务、下列八项指标的真实
+> 读数）仍保留给接入方执行——pilot 的 executor 是脚本，产出差异是 built-in 的。
 
 最终必须使用真实 WP Agent 测试。
 

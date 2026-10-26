@@ -1430,7 +1430,17 @@ External Database
 
 ---
 
-# 14. Milestone 11 — CLI
+# 14. Milestone 11 — CLI（已完成）
+
+> 完成记录（2026-10-26）：`aer/cli.py`，argparse 实现、无新依赖，输出刻意用
+> 英文（一半场景是 Windows GBK 控制台）。Task 11.1 全部命令（init / runs /
+> run show / experience list / experience show / experience search / stats）+
+> Task 11.2 的 `aer doctor`（目录权限、SQLite 可开、迁移在 head、
+> PRAGMA quick_check、FTS5 可用性、配置摘要），任一检查不过退出码 1。
+> 数据目录解析顺序：--data-dir → AER_DATA_DIR → ./data。console script 入口
+> `aer = aer.cli:main`，`python -m aer.cli` 等价。测试 `tests/cli/test_cli.py`
+> 驱动 `main([...])` 断言退出码与输出；search 在索引不可达时报错退出
+> （不静默返回空），与运行时对 agent 的规则一致。
 
 ## Goal
 

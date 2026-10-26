@@ -39,6 +39,11 @@ dependencies = [
     "sqlalchemy>=2.0",
 ]
 
+[project.scripts]
+# The operator CLI (Milestone 11, TASKS.md #14). `python -m aer.cli` works too;
+# the console script is the same entry point with a shorter name.
+aer = "aer.cli:main"
+
 [project.optional-dependencies]
 # The NeuG-backed retrieval index (M6).
 #

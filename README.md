@@ -131,7 +131,7 @@ Infrastructure — Repo / Docker / CI / CD / Backup  ✅
   与已真实执行过的[灾难恢复演练](docs/DEPLOYMENT.md#15-灾难恢复演练disaster-recovery-drill)
 
 尚未实现（后续 Milestone）：Cursor 的真实 Adapter、Dataset Builder、Workflow、
-Artifact、CLI、FastAPI、Dashboard、Embedding / HNSW、模型训练。
+Artifact、FastAPI、Dashboard、Embedding / HNSW、模型训练。
 
 本轮**刻意不做**（见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) 第 16 节）：
 Kubernetes / Helm / Terraform / Ansible、Redis / Kafka / PostgreSQL、
@@ -238,6 +238,31 @@ verified_success := Run.status is SUCCESS
                     and required_total > 0        # 「没有验证」不等于「全部通过」
                     and required_failed == 0
 ```
+
+---
+
+## 命令行（CLI）
+
+安装后得到 `aer` 命令（未安装时用 `python -m aer.cli`，完全等价）。CLI 是运行时
+之上的只读透镜：它用与嵌入式调用方相同的方式打开数据目录，屏幕上每个事实都来自
+同一批 repository。
+
+```bash
+aer init                          # 建数据目录 + 数据库 + 迁移到最新 revision
+aer runs [--status FAILED]        # 列出 Run（默认最新在前）
+aer run show <id>                 # 单个 Run：验证结论、错误、恢复、关联经验
+aer experience list [--kind RECOVERY]
+aer experience show <id>          # 完整 claim + 来源 Run（provenance）
+aer experience search "REST API 403"   # 检索知识索引（需要 neug extra）
+aer stats                         # 按状态/类别的全库计数 + 索引投影状态
+aer doctor                        # 目录权限 / SQLite / 迁移 / 完整性 / FTS5 / 配置
+
+aer --data-dir /path/to/data <命令>   # 指定数据目录（或环境变量 AER_DATA_DIR）
+```
+
+`aer doctor` 任何一项不过都返回退出码 1——可以放进部署脚本和定时巡检。
+`experience search` 在索引不可达时**报错退出而不是返回空结果**（「知识库挂了」
+与「没有已知经验」是两种世界，CLI 和运行时对 agent 坚持同一规则）。
 
 ---
 

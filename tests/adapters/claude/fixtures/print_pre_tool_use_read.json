@@ -1,0 +1,16 @@
+{
+  "session_id": "dd01acbd-b792-42fd-82da-2c218e9838bd",
+  "transcript_path": "C:\\Users\\Administrator\\.claude\\projects\\C--Users-ADMINI-1-AppData-Local-Temp-aer-claude-probe-m2637fng\\dd01acbd-b792-42fd-82da-2c218e9838bd.jsonl",
+  "cwd": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\aer-claude-probe-m2637fng",
+  "prompt_id": "51002b55-9f34-4984-9746-d0039bc57451",
+  "permission_mode": "default",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Read",
+  "tool_input": {
+    "file_path": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\aer-claude-probe-m2637fng\\probe.txt"
+  },
+  "tool_use_id": "tool_WRop4BstaY83zItlmK9hHtf1"
+}

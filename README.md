@@ -75,6 +75,9 @@ Milestone 5 — Experience Core        ✅
 Milestone 6 — NeuG Retrieval         ✅
 Milestone 7 — Experience Usage       ✅
 Milestone 8 — Agent Adapter Protocol ✅
+M8.1 Codex Adapter（实测覆盖矩阵）    ✅
+M8.2 DSH Adapter（原生插件）          ✅
+M8.2' Claude Code Adapter（实测）     ✅
 Infrastructure — Repo / Docker / CI / CD / Backup  ✅
 ```
 
@@ -122,9 +125,8 @@ Infrastructure — Repo / Docker / CI / CD / Backup  ✅
 - **灾备可验证**：备份/恢复工具、`scripts/drill_{facts,compare,seed}.py`
   与已真实执行过的[灾难恢复演练](docs/DEPLOYMENT.md#15-灾难恢复演练disaster-recovery-drill)
 
-尚未实现（后续 Milestone）：Codex / Claude Code / Cursor / DSH 的真实
-Adapter（M8.1–M8.4）、Dataset Builder、Workflow、完整 Sanitizer、Artifact、
-CLI、FastAPI、Dashboard、Embedding / HNSW、模型训练。
+尚未实现（后续 Milestone）：Cursor 的真实 Adapter、Dataset Builder、Workflow、
+完整 Sanitizer、Artifact、CLI、FastAPI、Dashboard、Embedding / HNSW、模型训练。
 
 本轮**刻意不做**（见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) 第 16 节）：
 Kubernetes / Helm / Terraform / Ansible、Redis / Kafka / PostgreSQL、
@@ -913,3 +915,29 @@ python scripts/probe_codex_hooks.py --use-auth # 需要一次真实回合（会�
 可选 MCP 接入层提供 stdio 和需 Bearer 认证的 HTTP 传输，复用现有 SDK。
 安装与客户端配置、验证器配置及验收边界见 [docs/MCP_ACCESS.md](docs/MCP_ACCESS.md)。
 当前聊天会话需由客户端配置连接后才会获得工具；代码安装不等于自动挂载。
+
+## Claude Code 接入：同一协议，第二个实测平台
+
+M8.2' 把 Claude Code 的生命周期 Hook 接进 AER，同样用**公开 hook 接口**
+（`settings.json`），不补丁、不代理。与 Codex 版相同的探针纪律：
+
+```bash
+python -m aer.adapter.claude.hook --print-coverage   # 打印实测覆盖矩阵
+python scripts/probe_claude_hooks.py                 # 免费：不花 token
+python scripts/probe_claude_hooks.py --use-auth      # 一次真实回合（消耗额度）
+```
+
+三个由实测（而非文档或字符串表）决定的语义，记录在
+[`docs/DECISIONS.md`](docs/DECISIONS.md)：
+
+```text
+D-101 终态权威是 SessionEnd。"Teardown" 在二进制字符串表里存在，
+      但 CLI 校验器拒绝它——词汇表以校验器为准，两个陷阱钉成回归测试。
+D-102 工具失败走专用事件 PostToolUseFailure（结构化 error）；
+      PostToolUse 的 tool_response 没有任何判定字段，success 恒为 None。
+      D-097 在 Codex 是平台限制，在 Claude Code 有结构化通道——
+      两个 adapter 的能力不对称被记录在各自覆盖矩阵里，而不是被抹平。
+turn  一个会话会活过很多任务：UserPromptSubmit 在旧 Run 仍开着时
+      先把旧 Run 关为 INCONCLUSIVE 再开新 Run。Run 的粒度是 turn，不是 session。
+```
+

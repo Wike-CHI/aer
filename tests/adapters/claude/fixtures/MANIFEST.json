@@ -1,0 +1,19 @@
+{
+  "claude_version": "2.1.310",
+  "verified_on": "2026-10-26",
+  "mode": "print",
+  "source": "scripts/probe_claude_hooks.py (--use-auth for tool events)",
+  "fixtures": {
+    "print_cwd_changed.json": "captured",
+    "print_instructions_loaded_project.json": "captured",
+    "print_instructions_loaded_user.json": "captured",
+    "print_post_tool_use_bash.json": "captured",
+    "print_post_tool_use_failure_read.json": "captured",
+    "print_pre_tool_use_bash.json": "captured",
+    "print_pre_tool_use_read.json": "captured",
+    "print_session_end.json": "captured",
+    "print_session_start.json": "captured",
+    "print_stop.json": "captured",
+    "print_user_prompt_submit.json": "captured"
+  }
+}

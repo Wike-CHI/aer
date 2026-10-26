@@ -2181,3 +2181,33 @@ Agent execution → Declared Outcome or INCONCLUSIVE → Independent Verificatio
 
 **仍然存在的限制**：Codex 在没有验证路径时产不出经验（因为没有 kind 可写）。
 这是刻意的选择，见 D-100 的"代价"。
+
+# 10.5 Milestone 8.2' — Claude Code Adapter（已完成）
+
+> 编号说明：原 M8.2（Claude Code）被 DSH 插队后沿用 M8.2，本条按完成顺序记为 M8.2'。
+
+## 交付
+
+- `aer/adapter/claude/`：mapping（纯函数）/ adapter / hook 命令 / coverage 矩阵，
+  镜像 Codex adapter 的四件结构。
+- `scripts/probe_claude_hooks.py`：免费探针（`--use-auth` 捕获工具事件）；
+  用 `claude --settings` 叠 scratch 配置，不碰操作者设置。
+- `tests/adapters/claude/fixtures/`：11 个 probe 捕获的真实 payload（2.1.310，
+  print 模式），MANIFEST 声明来源。
+- 决策记录：D-101（`SessionEnd` 是终态权威；`Teardown`/`PostToolUseBatch`
+  被 CLI 校验器拒绝——词汇表以校验器为准）、D-102（`PostToolUseFailure`
+  是结构化失败通道；`PostToolUse.tool_response` 无判定字段）。
+
+## 与 Codex adapter 的两点实质差异（都由实测决定）
+
+```text
+turn 粒度   一个 Claude Code 会话活过多个任务；UserPromptSubmit 关闭旧 Run
+            （INCONCLUSIVE）再开新 Run。Codex 的 exec 模式一会话一任务。
+失败通道    PostToolUse 无 outcome 字段；失败走专用 PostToolUseFailure。
+            Codex 则是工具失败在 payload 里完全不可见（D-097）。
+```
+
+## 边界（与 M8 一致）
+
+Adapter 无 external_verification / explicit_adoption_signal 能力；
+每个 Run 以 INCONCLUSIVE 关闭，由独立验证决定是否有经验产出（D-100）。

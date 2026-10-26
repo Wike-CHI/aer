@@ -1,0 +1,9 @@
+{
+  "session_id": "dd01acbd-b792-42fd-82da-2c218e9838bd",
+  "transcript_path": "C:\\Users\\Administrator\\.claude\\projects\\C--Users-ADMINI-1-AppData-Local-Temp-aer-claude-probe-m2637fng\\dd01acbd-b792-42fd-82da-2c218e9838bd.jsonl",
+  "cwd": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\aer-claude-probe-m2637fng",
+  "prompt_id": "51002b55-9f34-4984-9746-d0039bc57451",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Use the Bash tool to run `echo probe-ok`, then use the Read tool to read the file `probe.txt` if it exists, then reply with the single word ok."
+}

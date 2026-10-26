@@ -1,0 +1,9 @@
+{
+  "session_id": "dd01acbd-b792-42fd-82da-2c218e9838bd",
+  "transcript_path": "C:\\Users\\Administrator\\.claude\\projects\\C--Users-ADMINI-1-AppData-Local-Temp-aer-claude-probe-m2637fng\\dd01acbd-b792-42fd-82da-2c218e9838bd.jsonl",
+  "cwd": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\aer-claude-probe-m2637fng",
+  "hook_event_name": "InstructionsLoaded",
+  "file_path": "C:\\Users\\ADMINI~1\\.claude\\CLAUDE.md",
+  "memory_type": "Project",
+  "load_reason": "session_start"
+}

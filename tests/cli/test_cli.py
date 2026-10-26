@@ -177,6 +177,11 @@ class TestSearch:
     @pytest.mark.skipif(not HAS_NEUG, reason="needs the optional neug index")
     def test_search_finds_relevant_experience(self, cli: CliRunner, data_dir: Path) -> None:
         seed_recovery(data_dir)
+        # Retrieval is a projection read: a store whose knowledge index was never
+        # built has no schema to query (on CI, "Table Experience does not exist").
+        # Projecting is what a real deployment does before serving search.
+        with AER(data_dir) as aer:
+            aer.project_experiences()
 
         code, out, _ = cli(*run_cli(data_dir, "experience", "search", "REST API 403"))
 

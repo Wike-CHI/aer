@@ -67,6 +67,7 @@ from aer.runtime.models import (
     VerificationRecord,
 )
 from aer.runtime.run import RunContext
+from aer.runtime.sanitization import sanitize_json
 from aer.runtime.serialization import JsonObject, new_id, to_json_object
 from aer.storage.database import Database
 from aer.storage.repositories import (
@@ -619,7 +620,7 @@ class AER:
             agent_version=agent_version,
             model_provider=model_provider,
             model_name=model_name,
-            metadata=to_json_object(metadata),
+            metadata=sanitize_json(to_json_object(metadata)),
         )
         self._runs.create(run)
 

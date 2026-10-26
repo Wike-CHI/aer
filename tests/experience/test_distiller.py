@@ -1,9 +1,9 @@
-"""The distillation pass: provider contract, normalisation, validation, crashes.
+"""The distillation pass: provider contract, normalisation, sanitisation, crashes.
 
 Sections 20, 23-25, 43 and 50. The theme running through this file is that the
 provider is untrusted code whose output is a *proposal*: it may be a language model,
-it may lie about the kind, it may return rubbish, and none of that is allowed to
-reach storage or to decide what the run was.
+it may lie about the kind, it may quote a credential from the run's evidence, and
+none of that is allowed to reach storage or to decide what the run was.
 """
 
 from __future__ import annotations
@@ -134,6 +134,64 @@ class TestPass:
 
         assert experience_after.kind is None  # provider said nothing
         assert aer.experiences.count(include_deprecated=True) == 0
+
+
+class TestSanitization:
+    """agent.md #39 at the provider boundary: the distiller's output is what gets
+    stored, so credential shapes a provider quoted from the run's evidence must not
+    survive into it -- not in the prose, and not in the free-form metadata dict."""
+
+    SECRET = "sk-abcdefghijklmnop0123456789"
+    BEARER = f"Bearer {SECRET}"
+
+    def leaky_candidate(self) -> ExperienceCandidate:
+        return candidate(
+            title=f"  403 fix using {self.BEARER}  ",
+            problem=f"the api_key={self.SECRET} was rejected",
+            symptoms=(f"re-sent with {self.BEARER}",),
+            failed_attempts=(f"blind retry with api_key={self.SECRET}",),
+            root_cause=f"expired token {self.SECRET}",
+            solution=f"rotate api_key to {self.BEARER}",
+            recommended_workflow=(f"refresh {self.BEARER} first",),
+            avoid=(f"never log {self.BEARER}",),
+            metadata={"request": {"headers": {"authorization": self.BEARER}}},
+        )
+
+    def test_every_text_field_is_redacted(self, aer: AER) -> None:
+        distilled = distil(aer, StaticProvider(self.leaky_candidate()), build_recovery_run(aer))
+
+        for field in (
+            distilled.title,
+            distilled.problem,
+            distilled.root_cause,
+            distilled.solution,
+            *distilled.symptoms,
+            *distilled.failed_attempts,
+            *distilled.recommended_workflow,
+            *distilled.avoid,
+        ):
+            assert field is not None
+            assert self.SECRET not in field
+        # Redaction, not deletion: the sentence is still there to read.
+        assert "403 fix using Bearer [REDACTED]" in distilled.title
+
+    def test_metadata_gets_key_based_redaction(self, aer: AER) -> None:
+        distilled = distil(aer, StaticProvider(self.leaky_candidate()), build_recovery_run(aer))
+
+        headers = distilled.metadata["request"]["headers"]
+        assert headers == {"authorization": "[REDACTED]"}
+
+    def test_normalisation_still_applies(self, aer: AER) -> None:
+        distilled = distil(aer, StaticProvider(self.leaky_candidate()), build_recovery_run(aer))
+
+        assert distilled.title == "403 fix using Bearer [REDACTED]"  # stripped AND redacted
+
+    def test_the_providers_original_candidate_is_untouched(self, aer: AER) -> None:
+        original = self.leaky_candidate()
+
+        distil(aer, StaticProvider(original), build_recovery_run(aer))
+
+        assert self.SECRET in original.title  # sanitisation is a copy, not a mutation
 
 
 class TestBadOutput:

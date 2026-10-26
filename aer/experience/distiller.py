@@ -9,7 +9,9 @@ must do *regardless of who does the thinking* lives here:
    because a provider is arbitrary code and a malformed return value must not travel
    further;
 3. normalise the candidate, so whitespace and blank entries cannot make two identical
-   claims look different downstream.
+   claims look different downstream;
+4. sanitize it, so a credential the provider quoted from the run's evidence cannot
+   reach the ``experiences`` table or the dedup fingerprint (agent.md #39).
 
 It does not persist, does not decide the kind, and does not resolve the lifecycle.
 Those belong to :class:`~aer.experience.service.ExperienceService` (brief section 26).
@@ -25,13 +27,17 @@ The ``run_id`` entry point exists one level up, as
 from __future__ import annotations
 
 from aer.exceptions import DistillationError
-from aer.experience.candidate import ExperienceCandidate, normalise_candidate
+from aer.experience.candidate import (
+    ExperienceCandidate,
+    normalise_candidate,
+    sanitize_candidate,
+)
 from aer.experience.evidence import RunEvidence
 from aer.experience.provider import DistillationProvider
 
 
 class ExperienceDistiller:
-    """Runs one distillation pass and returns a normalised candidate."""
+    """Runs one distillation pass and returns a normalised, sanitised candidate."""
 
     def __init__(self, provider: DistillationProvider) -> None:
         if not isinstance(provider, DistillationProvider):
@@ -66,7 +72,7 @@ class ExperienceDistiller:
                 f"Provider {self.provider_name!r} returned {type(candidate).__name__}; "
                 "a distillation provider must return ExperienceCandidate"
             )
-        return normalise_candidate(candidate)
+        return sanitize_candidate(normalise_candidate(candidate))
 
     def __repr__(self) -> str:
         return f"ExperienceDistiller(provider={self.provider_name!r})"

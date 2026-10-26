@@ -1,33 +1,58 @@
-"""Minimal sanitisation applied before uncontrolled text reaches storage.
+"""Sanitisation applied before uncontrolled data reaches storage.
 
-This is deliberately **not** the full Sanitizer framework of agent.md #39 -- that
-is a later milestone. It covers the two places where uncontrolled, unmodelled text
-can enter the database in this milestone:
+This is the Sanitizer of agent.md #39, now applied to every structured write path:
+**Agent → Sanitizer → Storage**. Two complementary halves, always used together:
 
-* the ``repr`` of an object that had to be degraded into a fallback marker
-  (round-3 brief, section 24);
-* exception stack traces (round-3 brief, section 13).
+* **value-shape redaction** (:func:`redact`) -- catches credentials written into
+  free text: Bearer tokens, ``key=value`` assignments, PEM blocks, SSH key bodies,
+  provider key prefixes, URLs with inline passwords, header-style
+  ``Authorization:`` / ``Cookie:`` lines;
+* **key-based redaction** (:func:`is_secret_key`) -- catches the same credential
+  structured as ``{"api_key": "abc123"}``, where the value on its own has no
+  recognisable shape. A secret-keyed subtree is replaced wholesale: recursing into
+  it would still be reading the secret in order to forget it.
 
-Structured payloads supplied by the caller are stored as-is. Redacting them
-wholesale would corrupt legitimate trace data, and a complete pass belongs to the
-Sanitizer milestone that also owns retention rules.
+:func:`sanitize_json` is the recursive walker that applies both halves to an
+arbitrary JSON payload, with explicit markers for every transformation it makes:
+a truncated string says how many characters it dropped, a subtree past the depth
+limit says so. Silent truncation and silent redaction are both forbidden -- an
+operator must be able to see that the Sanitizer fired.
 
-The rules below are intentionally conservative: they match credential *shapes*
-(Bearer tokens, ``key=value`` assignments with a token-like value, PEM blocks,
-SSH key bodies, provider key prefixes, URLs with inline passwords) and leave
-ordinary prose, file paths, hashes and identifiers alone.
+The rules stay conservative: they match credential *shapes* and unambiguous key
+names, and leave ordinary prose, file paths, hashes and identifiers alone. A false
+positive silently destroys real trace data, which is worse than a missed redaction
+that another rule may still catch.
 """
 
 from __future__ import annotations
 
 import re
 import traceback
+from typing import TYPE_CHECKING, overload
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, and a runtime import would be
+    # circular: aer.runtime.serialization imports safe_repr from this module.
+    from aer.runtime.serialization import JsonObject, JsonValue
 
 #: Replacement written in place of a detected credential.
 REDACTED = "[REDACTED]"
 
 #: Default cap on a fallback ``repr``. Overridable per call via ``max_length``.
 FALLBACK_REPR_MAX_LENGTH = 4096
+
+#: Cap on any single string inside a sanitised JSON payload. Chosen to match the
+#: adapter protocol's own string cap (round-8 brief, section 30): one limit
+#: everywhere, so a payload that was legal on the way in stays legal on the way
+#: into storage. Longer strings are cut with an explicit marker, never silently.
+JSON_STRING_MAX_LENGTH = 4096
+
+#: Maximum nesting depth of a sanitised JSON payload. Deeper subtrees are replaced
+#: with an explicit marker. Depth, not total size, is what protects the storage
+#: layer from pathological structures; the string cap bounds the leaves.
+JSON_MAX_DEPTH = 8
+
+#: Marker replacing a subtree that exceeded :data:`JSON_MAX_DEPTH`.
+_DEPTH_MARKER = f"...<[truncated: deeper than {JSON_MAX_DEPTH} levels]>"
 
 #: Cap on a verifier-supplied ``message``. A verifier is free-form code and may
 #: hand back an entire HTML page or server response as its explanation; the column
@@ -57,12 +82,20 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     # Authorization: Bearer <token>
     (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{4,}"), f"Bearer {REDACTED}"),
-    # Authorization: <anything>
+    # Authorization: <anything> / Cookie: <anything> -- header-style appearances.
+    # ``Set-Cookie`` lands here too: the boundary at the start of ``cookie`` sits
+    # inside the hyphenated word, which ``\b`` treats as one word character run...
+    # so match the header names with an optional ``set-`` prefix instead.
     (re.compile(r"(?i)\bauthorization\b['\"]?\s*[:=]\s*\S+"), f"authorization={REDACTED}"),
-    # key = value / "key": "value" credential assignments
+    (re.compile(r"(?i)\b(?:set-)?cookie\b['\"]?\s*[:=]\s*\S+"), f"cookie={REDACTED}"),
+    # key = value / "key": "value" credential assignments. The token family names
+    # each compound spelling explicitly: ``refresh_token`` is one word to a regex
+    # with ``\b``, so ``token`` alone would never match inside it.
     (
         re.compile(
-            r"(?i)\b(api[_-]?key|apikey|access[_-]?key|secret|token|password|passwd|pwd)\b"
+            r"(?i)\b(api[_-]?key|apikey|access[_-]?(?:key|token)|refresh[_-]?token|"
+            r"id[_-]?token|session[_-]?token|client[_-]?secret|secret|token|"
+            r"password|passwd|pwd)\b"
             r"['\"]?\s*[:=]\s*"
             r"(?:" + _QUOTED_VALUE + r"|" + _UNQUOTED_VALUE + r")"
         ),
@@ -168,6 +201,60 @@ def is_secret_key(name: str) -> bool:
     if any(hint in normalized for hint in _CONTAINS_SECRET_KEYS):
         return True
     return normalized.endswith(_SECRET_KEY_SUFFIXES)
+
+
+@overload
+def sanitize_json(value: JsonObject) -> JsonObject: ...
+@overload
+def sanitize_json(value: JsonValue) -> JsonValue: ...
+
+
+def sanitize_json(value: JsonValue) -> JsonValue:
+    """Recursively sanitise one JSON payload: redact, cap, and mark every cut.
+
+    The single entry point of the Sanitizer (agent.md #39). Every string is passed
+    through :func:`redact` and capped at :data:`JSON_STRING_MAX_LENGTH` with the
+    explicit truncation marker; every dict member whose key :func:`is_secret_key`
+    recognises is replaced wholesale by :data:`REDACTED` -- the subtree is *not*
+    recursed into, because reading a credential in order to forget it is still
+    reading it; and anything past :data:`JSON_MAX_DEPTH` levels of nesting becomes
+    the depth marker. Numbers and booleans pass through untouched.
+
+    Idempotent on its own output, which matters because some write paths sanitise
+    a body before handing it to a seam that sanitises again (the adapter ingest
+    path and ``RunContext.emit`` are both sanitisers): ``REDACTED`` matches no
+    secret pattern, the truncation marker fits the length cap, and the depth
+    marker is a plain string at the level where it appears.
+
+    Callers normalise arbitrary objects into the JSON contract *before* calling
+    this; it deliberately accepts only ``JsonValue`` so this module never imports
+    the serialisation module that imports it.
+    """
+    return _sanitize_node(value, depth=0)
+
+
+def _sanitize_node(value: JsonValue, *, depth: int) -> JsonValue:
+    if isinstance(value, str):
+        capped = value
+        if len(capped) > JSON_STRING_MAX_LENGTH:
+            capped = truncate(capped, JSON_STRING_MAX_LENGTH)
+        return redact(capped)
+    if isinstance(value, list):
+        if depth >= JSON_MAX_DEPTH:
+            return _DEPTH_MARKER
+        return [_sanitize_node(item, depth=depth + 1) for item in value]
+    if isinstance(value, dict):
+        if depth >= JSON_MAX_DEPTH:
+            return _DEPTH_MARKER
+        cleaned: dict[str, JsonValue] = {}
+        for key, item in value.items():
+            if is_secret_key(key):
+                cleaned[key] = REDACTED
+            else:
+                cleaned[key] = _sanitize_node(item, depth=depth + 1)
+        return cleaned
+    # bool, int, float, None: nothing a credential can hide in.
+    return value
 
 
 def truncate(text: str, max_length: int) -> str:

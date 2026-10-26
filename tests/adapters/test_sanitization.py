@@ -138,7 +138,7 @@ class TestPrivateReasoningIsDroppedNotRedacted:
         metadata = stored_event(adapter_runtime, handle).metadata
         assert metadata["decision_summary"] == ("Inspect permissions before retrying the API call.")
         assert "chain_of_thought" not in metadata
-        assert "chain_of_thought" in metadata["sanitization"]["dropped_private_keys"]
+        assert "chain_of_thought" in metadata["sanitization"]["dropped_private_reasoning_keys"]
 
     def test_a_key_that_merely_contains_those_words_survives(self) -> None:
         """Exact matching, so ``reasoning_summary`` is not collateral damage."""

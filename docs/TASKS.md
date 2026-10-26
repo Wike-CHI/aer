@@ -1245,11 +1245,23 @@ Plugin Marketplace（注册表就是一个 dict）
 
 ---
 
-# 11. Milestone 8（原编号，后续执行）— Sanitizer
+# 11. Milestone 8（原编号，后续执行）— Sanitizer（已完成）
 
 > 编号说明：本文件原先把 Sanitizer 编为 M8。本轮（round-8）的 M8 是
 > Agent Adapter Protocol，Sanitizer 保留原任务内容但顺延，待真实多 Agent
 > 接入后按需要排期。Adapter 层已经自带一层外部输入治理（见 Task 8.6）。
+>
+> 完成记录（2026-10-26）：真实接入（M8.1 Codex / M8.2 DSH / M8.2' Claude Code）
+> 之后兑现。`aer/runtime/sanitization.py` 提供形状脱敏（`redact`）、键名脱敏
+> （`is_secret_key`）与递归walker（`sanitize_json`，8 层深度 / 4096 字符显式
+> 截断标记）；写路径覆盖 event input/output/metadata（`RunContext.emit` 单一
+> 缝合点）、error metadata、run metadata，以及 distiller 产出的经验正文与
+> candidate metadata（`sanitize_candidate`，在 `ExperienceDistiller.distill`
+> 内、先于 `validate_candidate` 与 dedup_key 计算——指纹里也不留凭据）。
+> 验收测试 `tests/runtime/test_sanitizer.py`：Bearer token 经工具输入/结果/
+> 元数据/经验正文任一路径都不得原值落库；`tests/experience/test_distiller.py`
+> 钉住 provider 边界行为。SECURITY.md 的"不夸大 Sanitizer"测试同步改写为
+> 钉住新边界（覆盖凭据、不覆盖数据分类）。
 
 ## Goal
 
@@ -1418,7 +1430,17 @@ External Database
 
 ---
 
-# 14. Milestone 11 — CLI
+# 14. Milestone 11 — CLI（已完成）
+
+> 完成记录（2026-10-26）：`aer/cli.py`，argparse 实现、无新依赖，输出刻意用
+> 英文（一半场景是 Windows GBK 控制台）。Task 11.1 全部命令（init / runs /
+> run show / experience list / experience show / experience search / stats）+
+> Task 11.2 的 `aer doctor`（目录权限、SQLite 可开、迁移在 head、
+> PRAGMA quick_check、FTS5 可用性、配置摘要），任一检查不过退出码 1。
+> 数据目录解析顺序：--data-dir → AER_DATA_DIR → ./data。console script 入口
+> `aer = aer.cli:main`，`python -m aer.cli` 等价。测试 `tests/cli/test_cli.py`
+> 驱动 `main([...])` 断言退出码与输出；search 在索引不可达时报错退出
+> （不静默返回空），与运行时对 agent 的规则一致。
 
 ## Goal
 
@@ -1538,7 +1560,16 @@ Task End
 
 ---
 
-# 17. Real-world Experiment
+# 17. Real-world Experiment（机械装置已完成，真实检验按原计划保留）
+
+> 完成记录（2026-10-26）：检验假设所需的**机械装置**落地——
+> `aer/experiment/`：`Experiment`（seed 决定的确定性分配 + 打戳的 begin_task +
+> 臂感知 retrieve：对照臂返回 None 且不留记录）、`compute_report`（#18 全部
+> 九项指标从打戳的 store 重算，空分母为 None 而非 0.0）、
+> `scripts/run_experiment_pilot.py`（脚本化 executor 的试点，验证装置端到端；
+> **不是假设检验**，输出自带此警告）。
+> 按本节原计划，真实检验（真实 WP Agent、每臂 ≥50 任务、下列八项指标的真实
+> 读数）仍保留给接入方执行——pilot 的 executor 是脚本，产出差异是 built-in 的。
 
 最终必须使用真实 WP Agent 测试。
 
@@ -2181,3 +2212,33 @@ Agent execution → Declared Outcome or INCONCLUSIVE → Independent Verificatio
 
 **仍然存在的限制**：Codex 在没有验证路径时产不出经验（因为没有 kind 可写）。
 这是刻意的选择，见 D-100 的"代价"。
+
+# 10.5 Milestone 8.2' — Claude Code Adapter（已完成）
+
+> 编号说明：原 M8.2（Claude Code）被 DSH 插队后沿用 M8.2，本条按完成顺序记为 M8.2'。
+
+## 交付
+
+- `aer/adapter/claude/`：mapping（纯函数）/ adapter / hook 命令 / coverage 矩阵，
+  镜像 Codex adapter 的四件结构。
+- `scripts/probe_claude_hooks.py`：免费探针（`--use-auth` 捕获工具事件）；
+  用 `claude --settings` 叠 scratch 配置，不碰操作者设置。
+- `tests/adapters/claude/fixtures/`：11 个 probe 捕获的真实 payload（2.1.310，
+  print 模式），MANIFEST 声明来源。
+- 决策记录：D-101（`SessionEnd` 是终态权威；`Teardown`/`PostToolUseBatch`
+  被 CLI 校验器拒绝——词汇表以校验器为准）、D-102（`PostToolUseFailure`
+  是结构化失败通道；`PostToolUse.tool_response` 无判定字段）。
+
+## 与 Codex adapter 的两点实质差异（都由实测决定）
+
+```text
+turn 粒度   一个 Claude Code 会话活过多个任务；UserPromptSubmit 关闭旧 Run
+            （INCONCLUSIVE）再开新 Run。Codex 的 exec 模式一会话一任务。
+失败通道    PostToolUse 无 outcome 字段；失败走专用 PostToolUseFailure。
+            Codex 则是工具失败在 payload 里完全不可见（D-097）。
+```
+
+## 边界（与 M8 一致）
+
+Adapter 无 external_verification / explicit_adoption_signal 能力；
+每个 Run 以 INCONCLUSIVE 关闭，由独立验证决定是否有经验产出（D-100）。

@@ -4552,3 +4552,86 @@ declared SUCCESS / declared FAILURE / declared ABORTED / outcome UNKNOWN
 
 - 若出现"一个既没有声明也没有验证的 Run 确实值得保留"的真实需求，
   应该讨论 `ExperienceKind` 是否需要第四个成员，**而不是**放宽这里。
+
+---
+
+## D-101 Claude Code 的终态权威是 `SessionEnd`；`Teardown` 不是 hook 事件
+
+**背景**：M8.2 Claude Code Adapter 第一版的事件词汇表是从 `claude.exe` 2.1.310
+的字符串表里提取的——事件名和 payload 键是二进制里的字面量，这比猜强，但字符串表
+同时命名内部实现细节。
+
+**实测（probe 第一次运行就抓到）**：把 `Teardown` 配进 hook 设置后，CLI 自己打印了
+`Unknown hook event "Teardown" was ignored`，并给出了**权威合法列表**
+（31 个事件）。同一轮还抓到 `PostToolUseBatch` 这个"看起来合理"的拼写被拒绝，
+正确拼写是 `PostToolBatch`。
+
+**决策**：
+
+- 词汇表以 **CLI 校验器的列表为准**，字符串表只作线索；
+- `SessionEnd` 是唯一的终态权威（`Teardown` 不存在于 hook 面）；
+- 这两个陷阱被钉成回归测试，防止"清理代码"时悄悄加回。
+
+**为什么重要**：如果按字符串表实现，adapter 会永远等一个永远不会来的 `Teardown`，
+每个 Run 都挂在 RUNNING——而且看起来"只是会话没结束"。这正是 D-097 的教训
+在词汇表层面的复现：未经实证的形状看起来被测试过，其实没有。
+
+**重新评估触发条件**：Claude Code 升级后先跑
+`python scripts/probe_claude_hooks.py`；校验器列表变化时同步词汇表。
+
+---
+
+## D-102 Claude Code 的工具失败走专用事件 `PostToolUseFailure`
+
+**背景**：Codex 的 D-097 留下一个开放问题：`tool_response` 是否结构化地陈述失败？
+对 Claude Code 这不再是开放问题。
+
+**实测（probe 捕获的真实 payload）**：
+
+- `PostToolUse` 的 `tool_response`（Bash）=
+  `{"stdout", "stderr", "interrupted", "isImage", "noOutputExpected"}`——**没有任何**
+  success/error 判定字段；`interrupted` 是"被中断"不是"失败"；
+- 失败有**专用事件** `PostToolUseFailure`：携带结构化 `error`（字符串）、
+  `is_interrupt`、`duration_ms`，且**没有** `tool_response`。
+
+**决策**：
+
+- `PostToolUse` → `TOOL_RESULT`，`success` 恒为 `None`（payload 没有陈述结果，
+  连 `True` 都不许写）；
+- `PostToolUseFailure` → 带 `success=False` + `error` 的 `TOOL_RESULT`，
+  ingest 路径自动展开为 ERROR→TOOL_RESULT 序；
+- 从 prose 推断失败在两条路径上都不需要也不允许。
+
+**与 D-097 的关系**：Codex 那边"失败不可见"是平台限制；Claude Code 这边
+平台给了结构化的失败通道。两个 adapter 因此有了不对称的能力，这被记录在
+各自的 coverage 矩阵里，而不是被抹平。
+
+**重新评估触发条件**：probe 捕获到 `PostToolUse.tool_response` 出现新工具
+带有判定字段时，按捕获升级映射（先有 fixture，再改代码）。
+
+---
+
+## D-103 Sanitizer 的经验正文边界钉在 distiller，而不是 repository
+
+**背景**：agent.md #39 的 Sanitizer 覆盖事件、错误、Run 元数据之后，剩最后一条
+写路径：distillation provider 产出的经验正文（title / problem / root_cause /
+solution / avoid / metadata）。SECURITY.md 一度写"走文本脱敏"但代码没有——
+文档先于实现，属于夸大，被 `test_oss_release.py` 的防夸大测试抓个正着。
+
+**决策**：新增 `sanitize_candidate`，在 `ExperienceDistiller.distill` 内、
+`normalise_candidate` 之后立即调用——先于 `validate_candidate` 和
+`dedup_key_for`。理由：
+
+- distiller 的输出就是入库的内容，边界在这里意味着 repository 层永远见不到
+  未脱敏的 provider 文本，与事件路径"emit 是单一缝合点"的纪律同构；
+- 先于 dedup_key 计算，脱敏后的指纹才一致：同一 secret 出现在两个 provider
+  的标题里时，去重看到的是同一个 `[REDACTED]`，不会拆成两条"不同"经验；
+- metadata 走 `sanitize_json`（键名 + 形状 + 结构上限），正文走 `redact`
+  （纯文本只有形状可判）。
+
+**随之改写**：SECURITY.md 防夸大测试不再钉"尚未完整实现"，改钉新边界
+（覆盖凭据、不覆盖数据分类，`tests/runtime/test_sanitizer.py` 补经验正文
+验收：Bearer token 经 provider 正文路径同样不得原值落库）。
+
+**重新评估触发条件**：出现新的"非事件"写路径（如 Artifact 存储）时，沿用
+同一问题："内容在哪一点之后就是存储？脱敏就钉在那一点之前。"

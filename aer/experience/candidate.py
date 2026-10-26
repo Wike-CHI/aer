@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from aer.exceptions import CandidateValidationError
 from aer.runtime.enums import ExperienceKind
+from aer.runtime.sanitization import redact, sanitize_json
 from aer.runtime.serialization import JsonObject
 
 _FROZEN = ConfigDict(extra="forbid", frozen=True)
@@ -114,6 +115,39 @@ def normalise_candidate(candidate: ExperienceCandidate) -> ExperienceCandidate:
         generalizable=candidate.generalizable,
         confidence_hint=candidate.confidence_hint,
         metadata=dict(candidate.metadata),
+    )
+
+
+def sanitize_candidate(candidate: ExperienceCandidate) -> ExperienceCandidate:
+    """Return a copy with credential shapes removed from every provider-supplied text.
+
+    A distillation provider is arbitrary code -- usually a language model reading a
+    run that *contains* whatever the agent handled, secrets included. Its prose lands
+    verbatim in the ``experiences`` table and in the ``dedup_key`` fingerprint, both
+    of which outlive the run, so the sanitiser (agent.md #39) is applied here, at the
+    boundary, before either is computed. Plain text fields go through
+    :func:`~aer.runtime.sanitization.redact`; the free-form ``metadata`` dict goes
+    through :func:`~aer.runtime.sanitization.sanitize_json`, which adds key-based
+    redaction and the structural caps.
+
+    Like :func:`normalise_candidate`, this is a copy: candidates are frozen, and the
+    caller keeps the provider's original wording if it needs to quote it.
+    """
+    return ExperienceCandidate(
+        domain=redact(candidate.domain),
+        title=redact(candidate.title),
+        problem=redact(candidate.problem),
+        kind=candidate.kind,
+        symptoms=tuple(redact(item) for item in candidate.symptoms),
+        failed_attempts=tuple(redact(item) for item in candidate.failed_attempts),
+        root_cause=None if candidate.root_cause is None else redact(candidate.root_cause),
+        root_cause_confidence=candidate.root_cause_confidence,
+        solution=None if candidate.solution is None else redact(candidate.solution),
+        recommended_workflow=tuple(redact(item) for item in candidate.recommended_workflow),
+        avoid=tuple(redact(item) for item in candidate.avoid),
+        generalizable=candidate.generalizable,
+        confidence_hint=candidate.confidence_hint,
+        metadata=sanitize_json(candidate.metadata),
     )
 
 

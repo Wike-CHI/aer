@@ -75,6 +75,9 @@ Milestone 5 — Experience Core        ✅
 Milestone 6 — NeuG Retrieval         ✅
 Milestone 7 — Experience Usage       ✅
 Milestone 8 — Agent Adapter Protocol ✅
+M8.1 Codex Adapter（实测覆盖矩阵）    ✅
+M8.2 DSH Adapter（原生插件）          ✅
+M8.2' Claude Code Adapter（实测）     ✅
 Infrastructure — Repo / Docker / CI / CD / Backup  ✅
 ```
 
@@ -100,6 +103,11 @@ Infrastructure — Repo / Docker / CI / CD / Backup  ✅
 - 嵌入式运行时：`AER` + `RunContext`
 - **Hook 上下文管理器**：`run.tool()` / `run.recovery()`，异常路径也保证写出结束事件
 - 统一 Error 管道：`run.error()`，结构化落库 + 脱敏后的 stack trace
+- **完整 Sanitizer**（agent.md #39）：Agent → Sanitizer → Storage。事件
+  input/output/metadata、错误与 Run 元数据在写路径上经 `sanitize_json`（键名 +
+  形状双重脱敏、深度/长度显式截断），distiller 产出的经验正文在 distiller 边界经
+  `sanitize_candidate` 文本脱敏——`Bearer sk-xxxx` 的原值不可能落库
+  （`tests/runtime/test_sanitizer.py`）
 - **独立验证引擎**：`run.verify()` → `VERIFICATION` 事件 + `VerificationRecord`
 - 四类验证器：`DETERMINISTIC`（`HttpStatusVerifier` / `H1CountVerifier` /
   `JsonValidVerifier` / `PredicateVerifier`）、`ENVIRONMENT`、`HUMAN`、`LLM`
@@ -122,9 +130,8 @@ Infrastructure — Repo / Docker / CI / CD / Backup  ✅
 - **灾备可验证**：备份/恢复工具、`scripts/drill_{facts,compare,seed}.py`
   与已真实执行过的[灾难恢复演练](docs/DEPLOYMENT.md#15-灾难恢复演练disaster-recovery-drill)
 
-尚未实现（后续 Milestone）：Codex / Claude Code / Cursor / DSH 的真实
-Adapter（M8.1–M8.4）、Dataset Builder、Workflow、完整 Sanitizer、Artifact、
-CLI、FastAPI、Dashboard、Embedding / HNSW、模型训练。
+尚未实现（后续 Milestone）：Cursor 的真实 Adapter、Dataset Builder、Workflow、
+Artifact、FastAPI、Dashboard、Embedding / HNSW、模型训练。
 
 本轮**刻意不做**（见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) 第 16 节）：
 Kubernetes / Helm / Terraform / Ansible、Redis / Kafka / PostgreSQL、
@@ -231,6 +238,31 @@ verified_success := Run.status is SUCCESS
                     and required_total > 0        # 「没有验证」不等于「全部通过」
                     and required_failed == 0
 ```
+
+---
+
+## 命令行（CLI）
+
+安装后得到 `aer` 命令（未安装时用 `python -m aer.cli`，完全等价）。CLI 是运行时
+之上的只读透镜：它用与嵌入式调用方相同的方式打开数据目录，屏幕上每个事实都来自
+同一批 repository。
+
+```bash
+aer init                          # 建数据目录 + 数据库 + 迁移到最新 revision
+aer runs [--status FAILED]        # 列出 Run（默认最新在前）
+aer run show <id>                 # 单个 Run：验证结论、错误、恢复、关联经验
+aer experience list [--kind RECOVERY]
+aer experience show <id>          # 完整 claim + 来源 Run（provenance）
+aer experience search "REST API 403"   # 检索知识索引（需要 neug extra）
+aer stats                         # 按状态/类别的全库计数 + 索引投影状态
+aer doctor                        # 目录权限 / SQLite / 迁移 / 完整性 / FTS5 / 配置
+
+aer --data-dir /path/to/data <命令>   # 指定数据目录（或环境变量 AER_DATA_DIR）
+```
+
+`aer doctor` 任何一项不过都返回退出码 1——可以放进部署脚本和定时巡检。
+`experience search` 在索引不可达时**报错退出而不是返回空结果**（「知识库挂了」
+与「没有已知经验」是两种世界，CLI 和运行时对 agent 坚持同一规则）。
 
 ---
 
@@ -913,3 +945,66 @@ python scripts/probe_codex_hooks.py --use-auth # 需要一次真实回合（会�
 可选 MCP 接入层提供 stdio 和需 Bearer 认证的 HTTP 传输，复用现有 SDK。
 安装与客户端配置、验证器配置及验收边界见 [docs/MCP_ACCESS.md](docs/MCP_ACCESS.md)。
 当前聊天会话需由客户端配置连接后才会获得工具；代码安装不等于自动挂载。
+
+## Claude Code 接入：同一协议，第二个实测平台
+
+M8.2' 把 Claude Code 的生命周期 Hook 接进 AER，同样用**公开 hook 接口**
+（`settings.json`），不补丁、不代理。与 Codex 版相同的探针纪律：
+
+```bash
+python -m aer.adapter.claude.hook --print-coverage   # 打印实测覆盖矩阵
+python scripts/probe_claude_hooks.py                 # 免费：不花 token
+python scripts/probe_claude_hooks.py --use-auth      # 一次真实回合（消耗额度）
+```
+
+三个由实测（而非文档或字符串表）决定的语义，记录在
+[`docs/DECISIONS.md`](docs/DECISIONS.md)：
+
+```text
+D-101 终态权威是 SessionEnd。"Teardown" 在二进制字符串表里存在，
+      但 CLI 校验器拒绝它——词汇表以校验器为准，两个陷阱钉成回归测试。
+D-102 工具失败走专用事件 PostToolUseFailure（结构化 error）；
+      PostToolUse 的 tool_response 没有任何判定字段，success 恒为 None。
+      D-097 在 Codex 是平台限制，在 Claude Code 有结构化通道——
+      两个 adapter 的能力不对称被记录在各自覆盖矩阵里，而不是被抹平。
+turn  一个会话会活过很多任务：UserPromptSubmit 在旧 Run 仍开着时
+      先把旧 Run 关为 INCONCLUSIVE 再开新 Run。Run 的粒度是 turn，不是 session。
+```
+
+---
+
+## A/B 实验（TASKS #17-#19）：P(success | experience) > P(success)？
+
+MVP 假设的检验机制。三个设计点：
+
+```text
+分配  arm_for(seed, unit) 是纯函数——同一任务永远进同一臂，跨进程可复现、
+      事后可审计。存疑的分配是可争辩的，随机的分配不是。
+盲执行 executor 代码在两个臂完全相同，只根据 retrieve() 是否返回经验分支——
+      这正是实验要测量的因果差。对照臂的 retrieve() 返回 None 且不留记录，
+      holdout 干净与否由 API 形状保证，不靠执行器自觉。
+计量   指标（#18 全部九项）从打了戳的 store 重算，不边跑边收集——
+      storage 是事实，每种读法都是投影。
+```
+
+```python
+from aer import AER, Experiment, compute_report
+
+with AER("./data", distillation_provider=my_provider) as aer:
+    experiment = Experiment(aer, name="wp-403", seed=42)
+    for task_id in task_queue:
+        task = experiment.begin_task(f"fix {task_id}", unit=task_id, task_type="wp")
+        guidance = task.retrieve("how do I avoid the 403")   # 对照臂: None
+        run_agent(task.run, guidance)                        # 两个臂同一函数
+    report = compute_report(aer, name="wp-403")
+    report.success_lift                                    # treatment - control
+```
+
+```bash
+python scripts/run_experiment_pilot.py --tasks 20 --seed 7   # 全机器可跑的试点
+```
+
+**试点不是假设检验**：pilot 的 executor 是脚本化的，产出的差异是手工 built-in
+的，它的职责是验证机械装置（分配、盲执行、指标计算）端到端可用。#17 把真正的
+检验保留给真实 WordPress Agent、每臂至少 50 个任务——那之前，`success_lift`
+再高也只说明"机器能报出差异"，不说明"经验有用"。pilot 的输出里带着同样的警告。

@@ -1245,11 +1245,23 @@ Plugin Marketplace（注册表就是一个 dict）
 
 ---
 
-# 11. Milestone 8（原编号，后续执行）— Sanitizer
+# 11. Milestone 8（原编号，后续执行）— Sanitizer（已完成）
 
 > 编号说明：本文件原先把 Sanitizer 编为 M8。本轮（round-8）的 M8 是
 > Agent Adapter Protocol，Sanitizer 保留原任务内容但顺延，待真实多 Agent
 > 接入后按需要排期。Adapter 层已经自带一层外部输入治理（见 Task 8.6）。
+>
+> 完成记录（2026-10-26）：真实接入（M8.1 Codex / M8.2 DSH / M8.2' Claude Code）
+> 之后兑现。`aer/runtime/sanitization.py` 提供形状脱敏（`redact`）、键名脱敏
+> （`is_secret_key`）与递归walker（`sanitize_json`，8 层深度 / 4096 字符显式
+> 截断标记）；写路径覆盖 event input/output/metadata（`RunContext.emit` 单一
+> 缝合点）、error metadata、run metadata，以及 distiller 产出的经验正文与
+> candidate metadata（`sanitize_candidate`，在 `ExperienceDistiller.distill`
+> 内、先于 `validate_candidate` 与 dedup_key 计算——指纹里也不留凭据）。
+> 验收测试 `tests/runtime/test_sanitizer.py`：Bearer token 经工具输入/结果/
+> 元数据/经验正文任一路径都不得原值落库；`tests/experience/test_distiller.py`
+> 钉住 provider 边界行为。SECURITY.md 的"不夸大 Sanitizer"测试同步改写为
+> 钉住新边界（覆盖凭据、不覆盖数据分类）。
 
 ## Goal
 

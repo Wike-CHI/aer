@@ -103,6 +103,11 @@ Infrastructure — Repo / Docker / CI / CD / Backup  ✅
 - 嵌入式运行时：`AER` + `RunContext`
 - **Hook 上下文管理器**：`run.tool()` / `run.recovery()`，异常路径也保证写出结束事件
 - 统一 Error 管道：`run.error()`，结构化落库 + 脱敏后的 stack trace
+- **完整 Sanitizer**（agent.md #39）：Agent → Sanitizer → Storage。事件
+  input/output/metadata、错误与 Run 元数据在写路径上经 `sanitize_json`（键名 +
+  形状双重脱敏、深度/长度显式截断），distiller 产出的经验正文在 distiller 边界经
+  `sanitize_candidate` 文本脱敏——`Bearer sk-xxxx` 的原值不可能落库
+  （`tests/runtime/test_sanitizer.py`）
 - **独立验证引擎**：`run.verify()` → `VERIFICATION` 事件 + `VerificationRecord`
 - 四类验证器：`DETERMINISTIC`（`HttpStatusVerifier` / `H1CountVerifier` /
   `JsonValidVerifier` / `PredicateVerifier`）、`ENVIRONMENT`、`HUMAN`、`LLM`
@@ -126,7 +131,7 @@ Infrastructure — Repo / Docker / CI / CD / Backup  ✅
   与已真实执行过的[灾难恢复演练](docs/DEPLOYMENT.md#15-灾难恢复演练disaster-recovery-drill)
 
 尚未实现（后续 Milestone）：Cursor 的真实 Adapter、Dataset Builder、Workflow、
-完整 Sanitizer、Artifact、CLI、FastAPI、Dashboard、Embedding / HNSW、模型训练。
+Artifact、CLI、FastAPI、Dashboard、Embedding / HNSW、模型训练。
 
 本轮**刻意不做**（见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) 第 16 节）：
 Kubernetes / Helm / Terraform / Ansible、Redis / Kafka / PostgreSQL、

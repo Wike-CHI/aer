@@ -110,7 +110,7 @@ class SanitizedBody:
         """The modification record, ready to merge into event metadata."""
         return {
             "redacted_keys": list(self.redacted_keys),
-            "dropped_private_keys": list(self.dropped_keys),
+            "dropped_private_reasoning_keys": list(self.dropped_keys),
             "truncated_strings": self.truncated_strings,
         }
 

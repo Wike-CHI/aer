@@ -536,10 +536,17 @@ class TestCommunityFiles:
         )
 
     def test_security_document_does_not_overstate_the_sanitiser(self) -> None:
-        """The one place where optimism would be a security problem of its own."""
+        """The one place where optimism would be a security problem of its own.
+
+        The Sanitizer milestone (agent.md #39) shipped the credential coverage --
+        events, errors, run metadata, and the distiller's experience text -- so the
+        honest statement moved from "尚未完整实现" to the *boundary*: credentials
+        are redacted, everything else (personal data, business content) still lands
+        verbatim, and the document must keep saying so.
+        """
         document = read_repo_file("SECURITY.md")
 
-        assert "Sanitizer 尚未完整实现" in document
+        assert "不覆盖数据分类" in document
         assert "原样落库" in document
 
     def test_contributing_document_forbids_rewriting_published_revisions(self) -> None:

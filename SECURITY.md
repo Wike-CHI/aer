@@ -61,10 +61,20 @@ AER 的用途就是**存下真实执行轨迹**。因此以下都是设计上的
 - `errors.error_message` 与 `stack_trace`；
 - `verifications.message`（验证器是调用方提供的任意代码，可能把整页 HTML 或
   服务端响应当作解释塞进来）；
-- `experiences` 的正文（problem / root_cause / solution / avoid / metadata）。
+- `experiences` 的正文（problem / root_cause / solution / avoid / metadata）——
+  由 distiller 产出，在 distiller 边界经 `sanitize_candidate` 文本脱敏后才落库。
 
-**结构化载荷是原样存储的**（见下面的"设计限制"）。如果你的 trace 里会有
-客户数据、个人信息或凭据，请把它们挡在 AER 之外，或自行在写入前脱敏。
+**结构化载荷在写入存储前经过 Sanitizer**（`sanitize_json`，agent.md #39）：
+按键名（`api_key` / `authorization` / `password` / `cookie` / `access_token` 等，
+整个子树替换为 `[REDACTED]`）与按值形状（`Bearer`、`key=value` 赋值、PEM 块、
+OpenSSH 密钥体、内联密码 URL、`sk-` / `AKIA` / `ghp_` 前缀、
+`Authorization:` / `Cookie:` 头）双重脱敏，超过 8 层嵌套与 4096 字符的字符串
+以显式标记截断。覆盖的写路径：event input/output/metadata、error metadata、
+run metadata、distiller 产出的 experience 正文与 candidate metadata
+（`sanitize_candidate`，先于 dedup_key 计算，指纹里也不留凭据）。规则刻意保守：
+宁可漏掉，也不要改写正常的散文、路径与哈希——
+所以**客户数据与个人信息仍然要挡在 AER 之外**，Sanitizer 的目标是凭据不长期落库，
+不是通用数据清洗。
 
 ### 2. 凭据出现在 stack trace 或 repr 中
 
@@ -142,11 +152,12 @@ Provider 里的代码。
 
 写清楚能力边界比宣称能力重要：
 
-1. **Sanitizer 尚未完整实现。** 现在只有 `aer/runtime/sanitization.py` 那个最小实现，
-   且**只作用于两处**：降级 fallback 的 `repr` 与 stack trace 文本。
-   **调用方传入的结构化 payload（tool input/output、event payload、verification message）
-   是原样落库的，不会被清洗。** 不要依赖 AER 替你过滤个人信息或凭据；完整的
-   Sanitizer 是后续里程碑，届时才谈保留策略。
+1. **Sanitizer 覆盖凭据，不覆盖数据分类。** 事件载荷、错误与 Run 元数据在写入前
+   会按凭据形状与键名脱敏（验收标准：`Bearer sk-xxxx` 的原值不得出现在数据库中，
+   见 `tests/runtime/test_sanitizer.py`）。但它不做数据分类、不留存策略审查：
+   **个人信息、客户数据、业务敏感内容仍然原样落库**，需要自行在写入前处理。
+   `experiences` 正文（distiller 产出）与 `verifications.message` 走文本脱敏，
+   结构化 metadata 同理；保留策略（多久、谁能看）仍属未做项。
 2. **静态数据不加密。** 数据库、备份、知识库索引都是明文。安全性等于文件权限。
 3. **没有鉴权、没有多租户、没有审计日志。** 能读到文件的人就能读到全部 trace。
 4. **不做出站网络请求**（除镜像构建期拉扩展）。检索完全本地。

@@ -140,6 +140,7 @@ from aer.exceptions import (
 from aer.experience.candidate import (
     ExperienceCandidate,
     normalise_candidate,
+    sanitize_candidate,
     validate_candidate,
 )
 from aer.experience.classify import classify_kind, outcome_is_verified
@@ -407,6 +408,7 @@ __all__ = [
     "outcome_is_verified",
     "query_fingerprint",
     "reachable_from",
+    "sanitize_candidate",
     "sanitize_external_body",
     "sanitize_query",
     "status_rank",

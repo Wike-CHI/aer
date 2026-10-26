@@ -119,7 +119,9 @@ target-version = "py312"
 src = ["aer", "tests"]
 # Markdown files are specifications, not code: ruff must not touch them even
 # though they contain python snippets.
-extend-exclude = ["data", ".venv", "*.md", "docs", "agent.md"]
+# agent-usage/ is the local dogfood scratchpad (record_session.py): local-only
+# recordings whose Chinese prose and long strings are data, not code style.
+extend-exclude = ["data", ".venv", "*.md", "docs", "agent.md", "agent-usage"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

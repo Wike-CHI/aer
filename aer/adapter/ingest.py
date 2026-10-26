@@ -1011,11 +1011,13 @@ class AdapterIngestor:
 
         notes = {
             "redacted_keys": sorted(set(body.redacted_keys) | set(extra.redacted_keys)),
-            "dropped_private_keys": sorted(set(body.dropped_keys) | set(extra.dropped_keys)),
+            "dropped_private_reasoning_keys": sorted(
+                set(body.dropped_keys) | set(extra.dropped_keys)
+            ),
             "truncated_strings": body.truncated_strings + extra.truncated_strings,
         }
         if (
-            any(notes[key] for key in ("redacted_keys", "dropped_private_keys"))
+            any(notes[key] for key in ("redacted_keys", "dropped_private_reasoning_keys"))
             or notes["truncated_strings"]
         ):
             meta["sanitization"] = to_json_object(notes)

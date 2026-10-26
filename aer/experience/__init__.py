@@ -28,6 +28,7 @@ success statistics and confidence calibration (Milestone 7).
 from aer.experience.candidate import (
     ExperienceCandidate,
     normalise_candidate,
+    sanitize_candidate,
     validate_candidate,
 )
 from aer.experience.classify import classify_kind, outcome_is_verified
@@ -55,5 +56,6 @@ __all__ = [
     "normalise_candidate",
     "normalise_text",
     "outcome_is_verified",
+    "sanitize_candidate",
     "validate_candidate",
 ]

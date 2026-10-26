@@ -66,7 +66,7 @@ from aer.runtime.enums import EventType, RunStatus
 from aer.runtime.external import ExternalEventRecorder
 from aer.runtime.hooks import RecoveryContext, ToolContext
 from aer.runtime.models import ErrorRecord, Event, Experience, Run, VerificationRecord
-from aer.runtime.sanitization import format_exception, redact
+from aer.runtime.sanitization import format_exception, redact, sanitize_json
 from aer.runtime.serialization import to_json_object, to_json_value, utc_now
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard for type checking only
@@ -203,14 +203,18 @@ class RunContext:
         """
         self._require_running(f"emit {EventType(event_type).value}")
 
+        # Sanitizer (agent.md #39): every structured payload is key-redacted,
+        # shape-redacted, depth-capped and string-capped on its way to storage.
+        # Idempotent, so an adapter body that was already sanitised upstream is
+        # not corrupted by the second pass.
         return self._runtime.events.create(
             Event(
                 run_id=self._run.id,
                 event_type=event_type,
-                input=to_json_value(input),
-                output=to_json_value(output),
+                input=sanitize_json(to_json_value(input)),
+                output=sanitize_json(to_json_value(output)),
                 duration_ms=duration_ms,
-                metadata=to_json_object(metadata),
+                metadata=sanitize_json(to_json_object(metadata)),
             )
         )
 
@@ -362,7 +366,7 @@ class RunContext:
         """
         message = redact(error_message)
         trace = None if stack_trace is None else redact(stack_trace)
-        meta = to_json_object(metadata)
+        meta = sanitize_json(to_json_object(metadata))
         payload = {
             "error_type": error_type,
             "error_message": message,
@@ -605,12 +609,14 @@ class RunContext:
             Event(
                 run_id=run.id,
                 event_type=EventType.TASK_END,
-                output=to_json_value(
-                    {
-                        "status": status.value,
-                        "final_score": run.final_score,
-                        "duration_ms": duration_ms,
-                    }
+                output=sanitize_json(
+                    to_json_value(
+                        {
+                            "status": status.value,
+                            "final_score": run.final_score,
+                            "duration_ms": duration_ms,
+                        }
+                    )
                 ),
                 created_at=ended_at,
                 duration_ms=duration_ms,

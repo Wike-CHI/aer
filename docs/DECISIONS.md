@@ -4608,3 +4608,30 @@ declared SUCCESS / declared FAILURE / declared ABORTED / outcome UNKNOWN
 
 **重新评估触发条件**：probe 捕获到 `PostToolUse.tool_response` 出现新工具
 带有判定字段时，按捕获升级映射（先有 fixture，再改代码）。
+
+---
+
+## D-103 Sanitizer 的经验正文边界钉在 distiller，而不是 repository
+
+**背景**：agent.md #39 的 Sanitizer 覆盖事件、错误、Run 元数据之后，剩最后一条
+写路径：distillation provider 产出的经验正文（title / problem / root_cause /
+solution / avoid / metadata）。SECURITY.md 一度写"走文本脱敏"但代码没有——
+文档先于实现，属于夸大，被 `test_oss_release.py` 的防夸大测试抓个正着。
+
+**决策**：新增 `sanitize_candidate`，在 `ExperienceDistiller.distill` 内、
+`normalise_candidate` 之后立即调用——先于 `validate_candidate` 和
+`dedup_key_for`。理由：
+
+- distiller 的输出就是入库的内容，边界在这里意味着 repository 层永远见不到
+  未脱敏的 provider 文本，与事件路径"emit 是单一缝合点"的纪律同构；
+- 先于 dedup_key 计算，脱敏后的指纹才一致：同一 secret 出现在两个 provider
+  的标题里时，去重看到的是同一个 `[REDACTED]`，不会拆成两条"不同"经验；
+- metadata 走 `sanitize_json`（键名 + 形状 + 结构上限），正文走 `redact`
+  （纯文本只有形状可判）。
+
+**随之改写**：SECURITY.md 防夸大测试不再钉"尚未完整实现"，改钉新边界
+（覆盖凭据、不覆盖数据分类，`tests/runtime/test_sanitizer.py` 补经验正文
+验收：Bearer token 经 provider 正文路径同样不得原值落库）。
+
+**重新评估触发条件**：出现新的"非事件"写路径（如 Artifact 存储）时，沿用
+同一问题："内容在哪一点之后就是存储？脱敏就钉在那一点之前。"

@@ -56,3 +56,6 @@ Thumbs.db
 # Local agent state (memory notes, task cache) — not project source
 .workbuddy/
 .dsh-e2e/
+
+# Resident service credentials are generated only on the deployment host.
+deploy/services.env

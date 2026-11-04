@@ -1,0 +1,31 @@
+# Opt-in resident services. The original one-shot runtime stays unchanged.
+name: aer
+services:
+  aer-dashboard:
+    extends:
+      file: compose.yaml
+      service: aer-runtime
+    restart: unless-stopped
+    command: [python, -m, aer.dashboard, --host, "0.0.0.0", --port, "8788"]
+    env_file:
+      - .env
+      - services.env
+    ports:
+      - "127.0.0.1:8788:8788"
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+  aer-mcp:
+    extends:
+      file: compose.yaml
+      service: aer-runtime
+    restart: unless-stopped
+    command: [python, -m, aer.mcp, --transport, http, --host, "0.0.0.0", --port, "8765"]
+    env_file:
+      - .env
+      - services.env
+    ports:
+      - "127.0.0.1:18765:8765"
+    mem_limit: 768m
+    cpus: 1.0
+    pids_limit: 128

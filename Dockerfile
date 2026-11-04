@@ -129,6 +129,10 @@ RUN python -m pip install --no-cache-dir --editable '.[knowledge]' \
 RUN python /app/scripts/install_neug_extensions.py \
  && chmod -R a+rX "$(python -c 'import neug, pathlib; print(pathlib.Path(neug.__file__).parent.parent)')/extension"
 
+# Optional HTTP surfaces share the same immutable release and database migrations.
+RUN python -m pip install --no-cache-dir --editable '.[web,mcp]' \
+ && python -m pip freeze --exclude-editable > /app/requirements.frozen.txt
+
 # Created here so that (a) a bare `docker run` without mounts still works and
 # (b) the mount points exist with the right owner. Bind mounts shadow them; the
 # host directories are what actually persists.

@@ -14,6 +14,18 @@ from aer.projects.config import Project, bind_store, code_version
 
 
 def capture(project: Project, payload: Mapping[str, object]) -> dict[str, object]:
+    from aer.projects.outbox import append, exclusive
+
+    # Serialize the whole local delivery, including the ledger and outbox ordering.
+    # Bound contention below the supervisor's eight-second hard deadline.
+    with exclusive(project.store / ".capture.lock", timeout=4):
+        outcome = _capture(project, payload)
+        if project.sync_source_id and outcome.get("run_id"):
+            append(project, payload, str(outcome["run_id"]))
+        return outcome
+
+
+def _capture(project: Project, payload: Mapping[str, object]) -> dict[str, object]:
     project.check_cwd(payload.get("cwd"))
     original_session = payload.get("session_id")
     if not isinstance(original_session, str) or not original_session.strip():

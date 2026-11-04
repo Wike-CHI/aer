@@ -26,6 +26,12 @@
 
 FROM python:3.12-slim AS runtime
 
+# Owner-operated closeout verifies an explicitly supplied repository revision.
+# Git does not fetch or execute client-supplied commands in the receive path.
+RUN apt-get update \
+ && apt-get install --no-install-recommends -y git php-cli \
+ && rm -rf /var/lib/apt/lists/*
+
 # Build metadata. Every production image must be traceable to a Git commit, so
 # these are real build arguments rather than a hard-coded version string; CI
 # passes the commit it just verified (docs/DEPLOYMENT.md, "Image identity").

@@ -55,6 +55,28 @@ async def call(server, name, **arguments):
     return json.loads(result[0].text)
 
 
+def test_pure_search_mcp_does_not_create_records(tmp_path, monkeypatch):
+    from aer.knowledge.models import RetrievalResult
+    from aer.runtime.enums import RetrievalMode
+
+    def retrieve(self, query, **kwargs):
+        return RetrievalResult(query=query, domain=kwargs["domain"], mode=RetrievalMode.GUIDANCE)
+
+    monkeypatch.setattr(AER, "retrieve", retrieve)
+    cfg = config(tmp_path)
+
+    async def scenario():
+        response = await call(create_server(cfg), "aer_search_experiences", query="field mapping")
+        assert response["status"] == "no_match"
+        assert response["injection_recorded"] is False
+        with AER(cfg.data_dir) as aer:
+            assert not aer.list_runs()
+            assert aer.retrieval_sessions.count() == 0
+            assert aer.experience_usage.count() == 0
+
+    anyio.run(scenario)
+
+
 def test_stdio_real_process_and_restart(tmp_path):
     env = {
         **os.environ,
@@ -70,7 +92,7 @@ def test_stdio_real_process_and_restart(tmp_path):
         ):
             await session.initialize()
             tools = await session.list_tools()
-            assert len(tools.tools) == 13
+            assert len(tools.tools) == 14
             started = await session.call_tool("aer_start_run", {"task": "real transport"})
             run_id = json.loads(started.content[0].text)["id"]
             forged = await session.call_tool(

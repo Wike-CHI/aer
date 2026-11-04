@@ -12,6 +12,12 @@ def overview(aer: AER) -> dict[str, object]:
     recent = aer.list_runs(limit=100)
     summaries = aer.verifications.summaries_by_run([run.id for run in recent])
     days = Counter(run.started_at.date().isoformat() for run in recent)
+    sessions = aer.list_retrieval_sessions(limit=100)
+    usage_signals = Counter(
+        usage.usage_signal.value
+        for session in sessions
+        for usage in aer.get_session_usage(session.id)
+    )
     return {
         "runs": aer.runs.count(),
         "experiences": aer.experiences.count(),
@@ -28,6 +34,8 @@ def overview(aer: AER) -> dict[str, object]:
             run.id not in summaries or summaries[run.id].required_total == 0 for run in recent
         ),
         "recent_daily": dict(sorted(days.items())),
+        "usage_sample_sessions": len(sessions),
+        "usage_signals": dict(usage_signals),
         "notice": (
             "验证与声明独立。趋势和验证指标仅统计最近 100 次任务。"
             "纯检索不记录使用。采用未知不能视为未采用。"

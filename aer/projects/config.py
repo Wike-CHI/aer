@@ -34,6 +34,12 @@ class Project(BaseModel):
     customer_id: str | None = None
     site_id: str | None = None
     checks: dict[str, Check] = Field(default_factory=dict)
+    sync_source_id: str | None = None
+
+    @field_validator("sync_source_id")
+    @classmethod
+    def source_id(cls, value: str | None) -> str | None:
+        return None if value is None else cls.stable_id(value)
 
     @field_validator("project_id", "task_id")
     @classmethod

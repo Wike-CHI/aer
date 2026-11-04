@@ -1012,3 +1012,5 @@ python scripts/run_experiment_pilot.py --tasks 20 --seed 7   # 全机器可跑�
 的，它的职责是验证机械装置（分配、盲执行、指标计算）端到端可用。#17 把真正的
 检验保留给真实 WordPress Agent、每臂至少 50 个任务——那之前，`success_lift`
 再高也只说明"机器能报出差异"，不说明"经验有用"。pilot 的输出里带着同样的警告。
+
+登记项目的 Claude 轨迹可通过[开发机到中央 AER 同步](docs/CENTRAL_SYNC.md)进入同一看板数据源；本地采集、显式传输和服务器独立验收分别执行。

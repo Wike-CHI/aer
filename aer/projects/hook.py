@@ -12,6 +12,25 @@ from pathlib import Path
 from aer.projects.config import OutOfProjectScope, load_project
 
 
+def reason_code(exc: Exception) -> str:
+    """Only controlled categories; never echo payloads or arbitrary exception text."""
+    from aer.projects.outbox import SyncLockTimeout
+
+    if isinstance(exc, SyncLockTimeout):
+        return "capture_lock_timeout"
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "capture_worker_timeout"
+    known = {
+        "Duplicate hook identity with conflicting result": "event_identity_conflict",
+        "Task outbox belongs to another device identity": "device_binding_conflict",
+        "Hook payload exceeds 64 KiB": "payload_too_large",
+        "Tool session already belongs to another task; start a new session": (
+            "session_task_conflict"
+        ),
+    }
+    return known.get(str(exc), "capture_" + type(exc).__name__.lower())
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", type=Path, required=True)
@@ -91,6 +110,7 @@ def main() -> int:
                         json.dumps(
                             {
                                 "reason": type(exc).__name__,
+                                "reason_code": reason_code(exc),
                                 "task_id": project.task_id,
                                 "worker_exit_code": worker_exit_code,
                             }

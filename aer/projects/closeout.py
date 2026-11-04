@@ -18,7 +18,14 @@ from aer.verification.environment import CallableEnvironmentVerifier
 
 
 def closeout(
-    project: Project, run_ids: list[str], revision: str, candidate: ExperienceCandidate
+    project: Project,
+    run_ids: list[str],
+    revision: str,
+    candidate: ExperienceCandidate,
+    *,
+    storage_path: Path | None = None,
+    knowledge_path: Path | None = None,
+    db_filename: str = "aer.db",
 ) -> list[JsonObject]:
     """Run owner-configured argv without shell interpolation or a client pass flag.
 
@@ -26,7 +33,8 @@ def closeout(
     exit status actually establishes. Syntax/field-only checks do not verify the
     complete task. Failed checks are retained; start a new repair run to retry.
     """
-    bind_store(project)
+    if storage_path is None:
+        bind_store(project)
     if not run_ids or len(set(run_ids)) != len(run_ids):
         raise ValueError("Select distinct source runs")
     if project.gap_file.exists() or any(project.pending_dir.glob("*.json")):
@@ -39,7 +47,10 @@ def closeout(
     provider = CallableDistillationProvider(name="project-candidate", func=lambda _: candidate)
     results: list[JsonObject] = []
     with AER(
-        project.store, knowledge_dir=project.knowledge_dir, distillation_provider=provider
+        storage_path or project.store,
+        knowledge_dir=knowledge_path or project.knowledge_dir,
+        distillation_provider=provider,
+        db_filename=db_filename,
     ) as aer:
         # Validate every association before performing any check or mutation.
         contexts = []

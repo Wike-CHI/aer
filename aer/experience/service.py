@@ -174,6 +174,15 @@ class ExperienceService:
             if any(pending.glob("*.json")):
                 raise DistillationError("Adapter capture incomplete: pending task delivery")
 
+        central = None if run is None else run.metadata.get("central_sync")
+        if isinstance(central, dict):
+            from aer.projects.central import assert_complete
+
+            try:
+                assert_complete(self._runtime, run_id, central)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                raise DistillationError("Central capture incomplete or receipt invalid") from exc
+
         # 1. Idempotency before anything expensive.
         already = self._existing_for_run(run_id)
         if already is not None:

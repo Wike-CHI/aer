@@ -944,6 +944,10 @@ python scripts/probe_codex_hooks.py --use-auth # 需要一次真实回合（会�
 
 可选 MCP 接入层提供 stdio 和需 Bearer 认证的 HTTP 传输，复用现有 SDK。
 安装与客户端配置、验证器配置及验收边界见 [docs/MCP_ACCESS.md](docs/MCP_ACCESS.md)。
+
+建站项目可按[项目采集与验收流程](docs/WORDPRESS_PROJECTS.md)登记 Claude Code
+任务、合并安装本地 Hook、执行独立验收并提交经验候选。运营上下文使用
+[纯检索契约](docs/SEARCH_CONTRACT.md)，查询不创建 Run 或采用记录。
 当前聊天会话需由客户端配置连接后才会获得工具；代码安装不等于自动挂载。
 
 ## Claude Code 接入：同一协议，第二个实测平台

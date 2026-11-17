@@ -62,6 +62,20 @@ class ExperimentReport:
             return None
         return self.treatment.success_rate - self.control.success_rate
 
+    @property
+    def verified_success_lift(self) -> float | None:
+        """Difference in independently verified success per assigned run.
+
+        This uses all runs in each arm, including unfinished/unverified runs,
+        just like ``verified_success_rate``. It is descriptive, not a test of
+        statistical significance or evidence that experience caused a change.
+        """
+        control = self.control.verified_success_rate
+        treatment = self.treatment.verified_success_rate
+        if control is None or treatment is None:
+            return None
+        return treatment - control
+
 
 def _rate(numerator: float, denominator: int) -> float | None:
     """``numerator / denominator``, or ``None`` when there is nothing to average."""

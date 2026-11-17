@@ -30,6 +30,10 @@ Task → Agent Execution → Hook Capture → Trajectory → Verification
 
 ## 完整闭环验收
 
+准备接入自己的 Agent 或参加首批开发者试用，先看
+[Experience Loop 接入与验证计划](docs/EXPERIENCE_LOOP_PILOT.md)。该计划复用已有
+Runtime 与实验能力；Cloud、商业定价和经验带来的效果仍需真实用户验证。
+
 最新 M7/M8 开发代码的安装与验收见 [可用版本说明](docs/USABLE_VERSION.md)。
 源码安装检索依赖后，还需执行 `python scripts/install_neug_extensions.py` 安装 FTS 扩展。
 运行 `python -m aer.demo --output-dir ./demo-results` 可验证本地失败、恢复、提炼、
@@ -254,6 +258,8 @@ aer run show <id>                 # 单个 Run：验证结论、错误、恢复�
 aer experience list [--kind RECOVERY]
 aer experience show <id>          # 完整 claim + 来源 Run（provenance）
 aer experience search "REST API 403"   # 检索知识索引（需要 neug extra）
+aer experiment report <name>          # 从持久化 Run 重算两臂指标
+aer experiment report <name> --json   # 导出 JSON，缺失分母为 null
 aer stats                         # 按状态/类别的全库计数 + 索引投影状态
 aer doctor                        # 目录权限 / SQLite / 迁移 / 完整性 / FTS5 / 配置
 

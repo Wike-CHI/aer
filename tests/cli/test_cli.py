@@ -8,12 +8,13 @@ check are failures a script can branch on.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 
-from aer import AER
+from aer import AER, Experiment, HttpStatusVerifier, VerificationContext
 from aer.cli import main
 from tests.experience.support import (
     StaticProvider,
@@ -235,3 +236,70 @@ class TestDoctor:
         assert code == 1
         assert "Directory Permission" in out
         assert "[FAIL]" in out
+
+
+class TestExperimentReport:
+    def test_reports_persisted_verdicts_and_does_not_add_runs_or_events(
+        self, cli: CliRunner, data_dir: Path
+    ) -> None:
+        with AER(data_dir) as aer:
+            experiment = Experiment(aer, name="pilot", seed=7)
+            for arm, status in (("control", 200), ("treatment", 500)):
+                unit = next(str(i) for i in range(100) if experiment.arm_for(str(i)) == arm)
+                task = experiment.begin_task("update page", unit=unit)
+                task.run.success()
+                task.run.verify(
+                    HttpStatusVerifier(expected_status=200),
+                    context=VerificationContext(
+                        run_id=task.run.run_id, payload={"actual_status": status}
+                    ),
+                )
+            aer.start_run(task="unrelated").success()
+            before = [(run.id, len(aer.get_events(run.id))) for run in aer.list_runs()]
+
+        code, out, err = cli(*run_cli(data_dir, "experiment", "report", "pilot", "--json"))
+
+        assert code == 0 and err == ""
+        report = json.loads(out)
+        assert report["schema_version"] == "aer.experiment.report.v1"
+        assert report["control"]["runs"] == report["treatment"]["runs"] == 1
+        assert report["success_lift"] == 0.0  # both agents claimed success
+        assert report["verified_success_lift"] == -1.0  # only control passed
+        assert "no statistical significance" in report["note"]
+        with AER(data_dir) as aer:
+            assert [(run.id, len(aer.get_events(run.id))) for run in aer.list_runs()] == before
+
+    def test_empty_arm_preserves_unknown_in_both_formats(
+        self, cli: CliRunner, data_dir: Path
+    ) -> None:
+        with AER(data_dir) as aer:
+            experiment = Experiment(aer, name="one-arm")
+            task = experiment.begin_task("pending", unit="single")
+            empty_arm = "control" if task.is_treatment else "treatment"
+        code, out, _ = cli(*run_cli(data_dir, "experiment", "report", "one-arm", "--json"))
+        assert code == 0
+        report = json.loads(out)
+        assert report[empty_arm]["success_rate"] is None
+        assert report["success_lift"] is report["verified_success_lift"] is None
+        code, out, _ = cli(*run_cli(data_dir, "experiment", "report", "one-arm"))
+        assert code == 0
+        assert "unknown" in out and "verified_success_rate" in out
+        assert "unfinished/unverified" in out
+
+    def test_unknown_experiment_is_an_error(self, cli: CliRunner, data_dir: Path) -> None:
+        with AER(data_dir):
+            pass
+        code, out, err = cli(*run_cli(data_dir, "experiment", "report", "typo", "--json"))
+        assert code == 1 and out == ""
+        assert "no experiment" in err
+
+    def test_missing_store_is_not_created(self, cli: CliRunner, data_dir: Path) -> None:
+        code, out, err = cli(*run_cli(data_dir, "experiment", "report", "pilot"))
+        assert code == 1 and out == ""
+        assert "no database" in err
+        assert not data_dir.exists()
+
+    def test_blank_name_is_rejected(self, cli: CliRunner, data_dir: Path) -> None:
+        code, _, err = cli(*run_cli(data_dir, "experiment", "report", "  "))
+        assert code == 1
+        assert "must not be blank" in err

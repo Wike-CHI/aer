@@ -14,6 +14,7 @@ Commands::
     aer experience list            list experiences, newest first
     aer experience show <id>       one experience, with its source runs
     aer experience search "query"  search the knowledge index
+    aer experiment report <name>  compare stored experiment arms (text or JSON)
     aer stats                      store-wide counts
     aer doctor                     environment and database health checks
 
@@ -24,13 +25,16 @@ it runs on Windows consoles whose codepage mangles UTF-8.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sqlite3
 import sys
 from collections.abc import Sequence
+from dataclasses import asdict, fields
 from pathlib import Path
 
 from aer import AER, __version__
+from aer.experiment.metrics import ArmMetrics, compute_report
 from aer.runtime.enums import ExperienceKind, ExperienceStatus, RunStatus
 from aer.runtime.runtime import DEFAULT_DB_FILENAME
 from aer.storage.migrations import current_revision, head_revision
@@ -286,6 +290,56 @@ def cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_experiment_report(args: argparse.Namespace) -> int:
+    """Recompute an experiment from stored facts without running an agent."""
+    if not args.name.strip():
+        return _fail("experiment name must not be blank")
+    data_dir = _data_dir(args)
+    if not (data_dir / DEFAULT_DB_FILENAME).is_file():
+        return _fail(f"no database in {data_dir}; select an existing experiment store")
+    with AER(data_dir) as aer:
+        report = compute_report(aer, name=args.name)
+    if report.control.runs + report.treatment.runs == 0:
+        return _fail(f"no experiment with name {args.name!r}")
+
+    note = (
+        "Descriptive comparison only; no statistical significance or causal claim. "
+        "Success rates use all assigned runs, including unfinished/unverified runs. "
+        "assisted_success_rate counts retrieval hits with declared success, not adoption."
+    )
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "schema_version": "aer.experiment.report.v1",
+                    **asdict(report),
+                    "success_lift": report.success_lift,
+                    "verified_success_lift": report.verified_success_lift,
+                    "note": note,
+                },
+                indent=2,
+                allow_nan=False,
+            )
+        )
+    else:
+        print(f"experiment: {report.name}")
+        rows = []
+        for field in fields(ArmMetrics):
+            values = [getattr(arm, field.name) for arm in (report.control, report.treatment)]
+            cells = ["unknown" if value is None else str(value) for value in values]
+            rows.append((field.name, *cells))
+        rows.extend(
+            (name, "-", "unknown" if value is None else str(value))
+            for name, value in (
+                ("success_lift", report.success_lift),
+                ("verified_success_lift", report.verified_success_lift),
+            )
+        )
+        _print_table(("METRIC", "CONTROL", "TREATMENT"), rows)
+        print(f"NOTE: {note}")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # doctor
 # ---------------------------------------------------------------------------
@@ -433,6 +487,12 @@ def build_parser() -> argparse.ArgumentParser:
     exp_search.add_argument("--domain")
     exp_search.add_argument("--limit", type=int, default=5)
 
+    experiment = sub.add_parser("experiment", help="inspect stored A/B experiments")
+    experiment_sub = experiment.add_subparsers(dest="experiment_command", required=True)
+    report = experiment_sub.add_parser("report", help="recompute both arms from stored runs")
+    report.add_argument("name", help="exact experiment name stamped by Experiment.begin_task")
+    report.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+
     sub.add_parser("stats", help="store-wide counts")
     sub.add_parser("doctor", help="environment and database health checks")
     return parser
@@ -452,6 +512,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "init": cmd_init,
             "runs": cmd_runs,
             "run": cmd_run_show,
+            "experiment": cmd_experiment_report,
             "stats": cmd_stats,
             "doctor": cmd_doctor,
         }[args.command]

@@ -35,6 +35,7 @@ or promote. Those are Milestones 6 and 7 (section 56).
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from aer.exceptions import DistillationError
@@ -155,6 +156,24 @@ class ExperienceService:
             BaseException: whatever the provider raised, re-raised unchanged after
                 being recorded as an ``ERROR`` system observation on the run.
         """
+        # A claimed-but-unapplied delivery is a known evidence gap, not a replay
+        # queue. Keep this check at the shared SDK boundary (also used by MCP).
+        if self._runtime.adapter_events.count(aer_run_id=run_id, applied=False):
+            raise DistillationError("Adapter capture incomplete: unapplied event claims")
+        run = self._runtime.get_run(run_id)
+        association = None if run is None else run.metadata.get("building_project")
+        if isinstance(association, dict):
+            task_id = association.get("task_id")
+            if not isinstance(task_id, str) or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", task_id
+            ):
+                raise DistillationError("Invalid project task association")
+            if (self._runtime.data_dir / "capture-gaps" / f"{task_id}.json").exists():
+                raise DistillationError("Adapter capture incomplete: task capture gap")
+            pending = self._runtime.data_dir / "capture-pending" / task_id
+            if any(pending.glob("*.json")):
+                raise DistillationError("Adapter capture incomplete: pending task delivery")
+
         # 1. Idempotency before anything expensive.
         already = self._existing_for_run(run_id)
         if already is not None:

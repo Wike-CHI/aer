@@ -22,6 +22,7 @@ from aer.adapter.sanitize import sanitize_external_body
 from aer.config import DeploymentConfig, load_deployment_config
 from aer.exceptions import RecordNotFoundError
 from aer.knowledge.formatter import ExperienceContextFormatter
+from aer.knowledge.search import search_experiences
 from aer.runtime.enums import EventType, RunStatus, UsageSignal, UsageSignalSource
 from aer.runtime.run import RunContext
 from aer.runtime.serialization import JsonObject
@@ -253,6 +254,14 @@ def create_server(
             return {
                 "experience": None if experience is None else experience.model_dump(mode="json")
             }
+
+    @server.tool()
+    def aer_search_experiences(
+        query: str, domain: str | None = None, limit: int = 3, max_chars: int = 4000
+    ) -> JsonObject:
+        """Pure historical lookup, aer.search.v1; no run or usage writes. Single-owner store."""
+        with runtime() as aer:
+            return search_experiences(aer, query, domain, limit, max_chars)
 
     @server.tool()
     def aer_retrieve(
